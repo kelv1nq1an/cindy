@@ -28,13 +28,13 @@ import {
 } from '../../shared/pluginIdentity';
 
 /**
- * `$` 后紧跟指令词(与 ghost.json command 约束同宽:无空白、不含 `/`,≤32 字符),可选 `/namespace`。
+ * `$` 后紧跟指令词(与 ghost.json command 约束同宽:无空白、不含 `/`,≤32 字符),可选 `/namespace`（与协议 orgSlug 同宽，最长 128）。
  * 触发符同时认全角变体(＄ U+FF04 / ¥ U+00A5 / ￥ U+FFE5):中文输入法下
  * Shift+4 产出的是 ￥,不切输入法也能触发——与 ChatInput 的
  * GHOST_SIGIL_CHARS 是同一字符集,两端必须保持一致。
  */
 const COMMAND_RE =
-  /^[$＄¥￥]([^/\s]{1,32})(?:\/([a-z0-9][a-z0-9-]{0,31}))?(?:\s|$)/;
+  /^[$＄¥￥]([^/\s]{1,32})(?:\/([a-z0-9](?:[a-z0-9-]{0,126}[a-z0-9])?))?(?:\s|$)/;
 
 export interface GhostCommandToken {
   word: string;

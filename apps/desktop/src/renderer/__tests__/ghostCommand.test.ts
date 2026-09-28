@@ -61,6 +61,9 @@ describe('parseGhostCommandWord', () => {
     expect(parseGhostCommandToken('$draw')).toEqual({ word: 'draw', namespace: null });
     expect(parseGhostCommandToken('$draw/')).toBeNull();
     expect(parseGhostCommandToken('$draw/ACME')).toBeNull();
+    const longNs = 'o' + 'r'.repeat(126) + 'g';
+    expect(longNs).toHaveLength(128);
+    expect(parseGhostCommandToken('$draw/' + longNs + ' a cat')).toEqual({ word: 'draw', namespace: longNs });
   });
 
   it('全角变体触发符同权(中文输入法 Shift+4 产出 ￥ 不必切半角)', () => {

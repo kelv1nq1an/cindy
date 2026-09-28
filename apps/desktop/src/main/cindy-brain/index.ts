@@ -2936,6 +2936,7 @@ export function loadGhostFirstPartyFactsForGhost(
     {
       membershipKind: user?.membershipKind ?? 'personal',
       orgId: user?.orgId ?? null,
+      orgSlug: user?.orgSlug ?? null,
     },
     overrides,
   );
@@ -6360,10 +6361,10 @@ export async function installOrUpdateLocalGhostPackageFromForge(
   const membershipKind = user?.membershipKind ?? 'personal';
   const installOrigin = forgeInstallOriginForMembership(membershipKind);
   const forgeNamespace = membershipKind === 'org' && user?.orgSlug ? user.orgSlug : undefined;
-  rejectUnauthorizedTokenBroker(
-    inspected.manifest,
-    installOrigin ? { installOrigin } : undefined,
-  );
+  rejectUnauthorizedTokenBroker(inspected.manifest, {
+    ...(installOrigin ? { installOrigin } : {}),
+    namespace: forgeNamespace ?? null,
+  });
   // 首装与扩权更新先在任务里请用户确认；权限没变多的更新不打扰。
   const consent = await obtainGhostInstallConsent(
     { mode: 'prompt', prompt: expected.consentPrompt, initiator: 'agent', origin: 'forge' },
@@ -6584,17 +6585,17 @@ async function installOrUpdateMarketGhostPackageLocked(
         );
       }
     }
-    rejectUnauthorizedTokenBroker(
-      inspected.canonicalManifest,
-      expected.pendingMarketRecord !== undefined
+    rejectUnauthorizedTokenBroker(inspected.canonicalManifest, {
+      namespace: expected.namespace ?? null,
+      ...(expected.pendingMarketRecord !== undefined
         ? {
             marketRecord: bindPendingMarketRecordToInspectedPackage(
               expected.pendingMarketRecord,
               inspected.packageSha256,
             ),
           }
-        : undefined,
-    );
+        : {}),
+    });
 
     // 用户确认在锁外求得；这里用即将落位的真实包与锁内现读的受体复核，确认后
     // 包内容或已装版本变了就拒绝，后台更新遇到需要确认的扩权直接放弃本轮。

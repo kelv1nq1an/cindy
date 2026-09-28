@@ -43,6 +43,7 @@ export type GhostFirstPartyFactsUnavailableReason =
 export interface GhostFirstPartyFactsIdentity {
   membershipKind: 'personal' | 'org';
   orgId: string | null;
+  orgSlug?: string | null;
 }
 
 export type GhostFirstPartyFactsLoad =
@@ -111,6 +112,12 @@ export function bindPendingMarketRecordToInspectedPackage(
 export type GhostFirstPartyFactsOverrides = {
   installOrigin?: 'manual' | 'agent-forge';
   marketRecord?: GhostFirstPartyMarketRecord | null;
+  /**
+   * Install-time delivery namespace. Runtime keeps parsing the storage part /
+   * install rel id; callers must not invent the current org slug at runtime.
+   * `undefined` means "parse from ghostId"; explicit `null` is root.
+   */
+  namespace?: string | null;
 };
 
 export function loadGhostFirstPartyFactsLoader(
@@ -124,6 +131,10 @@ export function loadGhostFirstPartyFactsLoader(
       // Receipts / origin live under install rel id (`helper` or `_ns/acme/helper`).
       // Runtime oauth may pass a storage part (`_ns__acme__helper`).
       const installRelId = parsed ? pluginInstallRelId(parsed) : ghostId;
+      const namespace =
+        overrides?.namespace !== undefined
+          ? overrides.namespace
+          : (parsed?.namespace ?? null);
       const unavailable = (
         reason: GhostFirstPartyFactsUnavailableReason,
       ): GhostFirstPartyFactsLoad => ({
@@ -175,6 +186,7 @@ export function loadGhostFirstPartyFactsLoader(
           kind: 'ready',
           facts: {
             ghostId: logicalGhostId,
+            namespace,
             builtin,
             marketRecord,
             currentOrganization: null,
@@ -200,7 +212,7 @@ export function loadGhostFirstPartyFactsLoader(
        */
       const builtinOnlyFacts = (): GhostFirstPartyFactsLoad => ({
         kind: 'ready',
-        facts: { ghostId: logicalGhostId, builtin, marketRecord, currentOrganization: null, installOrigin },
+        facts: { ghostId: logicalGhostId, namespace, builtin, marketRecord, currentOrganization: null, installOrigin },
       });
 
       let lookup: OrganizationPrefixLookup;
@@ -216,11 +228,13 @@ export function loadGhostFirstPartyFactsLoader(
           kind: 'ready',
           facts: {
             ghostId: logicalGhostId,
+            namespace,
             builtin,
             marketRecord,
             currentOrganization: {
               organizationId: identity.orgId,
               pluginPrefix: lookup.pluginPrefix,
+              orgSlug: identity.orgSlug ?? null,
             },
             installOrigin,
           },

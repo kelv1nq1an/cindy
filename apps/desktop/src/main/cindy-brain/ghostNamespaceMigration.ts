@@ -110,7 +110,12 @@ export function censusNamespaceMigration(
   if (existing.kind === 'unreadable' || existing.kind === 'corrupt') {
     return { kind: 'blocked', reason: existing.kind };
   }
-  if (existing.kind === 'ok') return { kind: 'unchanged', ledger: existing.ledger };
+  if (existing.kind === 'ok') {
+    const ledger = pruneAbsentPendingCensusEntries(existing.ledger, candidates);
+    return ledger === existing.ledger
+      ? { kind: 'unchanged', ledger }
+      : { kind: 'created', ledger };
+  }
   const entries: Record<string, NamespaceMigrationEntry> = {};
   for (const candidate of candidates) {
     if (!isCensusCandidate(candidate)) continue;
@@ -129,6 +134,33 @@ export function censusNamespaceMigration(
       entries,
     },
   };
+}
+
+export function pruneAbsentPendingCensusEntries(
+  ledger: NamespaceMigrationLedger,
+  candidates: readonly NamespaceCensusCandidate[],
+): NamespaceMigrationLedger {
+  const present = new Set(candidates.map((candidate) => candidate.ghostId));
+  let changed = false;
+  const entries: Record<string, NamespaceMigrationEntry> = {};
+  for (const [ghostId, entry] of Object.entries(ledger.entries)) {
+    if (entry.status === 'pending' && !present.has(ghostId)) {
+      changed = true;
+      continue;
+    }
+    entries[ghostId] = entry;
+  }
+  return changed ? { ...ledger, entries } : ledger;
+}
+
+export function dropNamespaceMigrationEntry(
+  ledger: NamespaceMigrationLedger,
+  ghostId: string,
+): NamespaceMigrationLedger {
+  if (!(ghostId in ledger.entries)) return ledger;
+  const entries = { ...ledger.entries };
+  delete entries[ghostId];
+  return { ...ledger, entries };
 }
 
 export function classifyNamespaceMigration(

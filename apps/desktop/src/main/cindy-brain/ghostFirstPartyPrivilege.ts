@@ -73,10 +73,14 @@ export interface GhostFirstPartyMarketRecord {
 export interface GhostFirstPartyCurrentOrganization {
   organizationId: string;
   pluginPrefix: string | null;
+  /** Permanent org slug; required to bind Forge self-test to the install namespace. */
+  orgSlug?: string | null;
 }
 
 export interface GhostFirstPartyFacts {
   ghostId: string;
+  /** Install namespace. null is root; a string is the bound orgSlug. */
+  namespace: string | null;
   /** True when the id is on the bundled seed roster (`InstalledGhost.builtin`). */
   builtin: boolean;
   marketRecord: GhostFirstPartyMarketRecord | null;
@@ -142,9 +146,11 @@ export function resolveGhostFirstPartyPrivilege(facts: GhostFirstPartyFacts): Gh
   // 企业作者的显式 Forge 自测资格来自本次安装来源与当前组织身份，和市场账本
   // 是否已有同 id、是否仍标记 installed 无关。它只开放 Broker / oidc-token，
   // 宿主原语仍保持拒绝。
-  if (
-    facts.installOrigin === 'agent-forge' && facts.currentOrganization
-  ) {
+  if (facts.installOrigin === 'agent-forge') {
+    const orgSlug = facts.currentOrganization?.orgSlug;
+    if (!orgSlug || facts.namespace !== orgSlug) {
+      return deny(facts.currentOrganization ? 'denied-foreign-org' : 'denied-unknown-origin');
+    }
     return allow('forge-current-org', false);
   }
 

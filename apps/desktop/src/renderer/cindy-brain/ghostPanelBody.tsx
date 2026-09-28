@@ -348,13 +348,14 @@ export function GhostChipPanelBody({
    *      用户根本没看到内容(codex review)。
    * 两层都满足的那一刻 effect 重跑并清零,语义正是「他看的时候才算看过」。
    */
-  const unread = useGhostUnread(manifest.id);
+  const unreadId = installedGhostStoragePart(ghost);
+  const unread = useGhostUnread(unreadId);
   const foreground = useHostWindowForeground();
   const { ref: observeHost, visible } = useElementVisible();
   useEffect(() => {
     if (!unread || !foreground || !visible) return;
-    clearGhostUnread(manifest.id);
-  }, [manifest.id, unread, foreground, visible]);
+    clearGhostUnread(unreadId);
+  }, [unreadId, unread, foreground, visible]);
 
   return (
     <GhostWebviewBody

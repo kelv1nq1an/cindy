@@ -9,7 +9,7 @@ import {
   type GhostFirstPartyMarketRecord,
 } from '../ghostFirstPartyPrivilege.js';
 
-const CURRENT_ORG = { organizationId: 'org-acme', pluginPrefix: 'acme' as const };
+const CURRENT_ORG = { organizationId: 'org-acme', pluginPrefix: 'acme' as const, orgSlug: 'acme' as const };
 
 const BUNDLED_NON_OFFICIAL_IDS = [
   '163-mail',
@@ -29,6 +29,7 @@ const BUNDLED_NON_OFFICIAL_IDS = [
 function facts(partial: Partial<GhostFirstPartyFacts> & Pick<GhostFirstPartyFacts, 'ghostId'>): GhostFirstPartyFacts {
   return {
     builtin: false,
+    namespace: null,
     marketRecord: null,
     currentOrganization: null,
     installOrigin: 'manual',
@@ -222,7 +223,7 @@ describe('resolveGhostFirstPartyPrivilege', () => {
         facts({
           ghostId: 'helper',
           marketRecord: market({ scope: 'organization', organizationId: 'org-acme' }),
-          currentOrganization: { organizationId: 'org-acme', pluginPrefix: null },
+          currentOrganization: { organizationId: 'org-acme', pluginPrefix: null, orgSlug: 'acme' },
         }),
       ),
     ).toEqual({
@@ -332,6 +333,7 @@ describe('resolveGhostFirstPartyPrivilege', () => {
         facts({
           ghostId: 'acme-feishu',
           currentOrganization: CURRENT_ORG,
+          namespace: 'acme',
           installOrigin: 'agent-forge',
         }),
       ),
@@ -350,6 +352,7 @@ describe('resolveGhostFirstPartyPrivilege', () => {
             source: 'local-market',
           }),
           currentOrganization: CURRENT_ORG,
+          namespace: 'acme',
           installOrigin: 'agent-forge',
         }),
       ).brokerEligible,
@@ -359,6 +362,7 @@ describe('resolveGhostFirstPartyPrivilege', () => {
         facts({
           ghostId: 'other-feishu',
           currentOrganization: CURRENT_ORG,
+          namespace: 'acme',
           installOrigin: 'agent-forge',
         }),
       ).brokerEligible,
@@ -367,7 +371,8 @@ describe('resolveGhostFirstPartyPrivilege', () => {
       resolveGhostFirstPartyPrivilege(
         facts({
           ghostId: 'helper',
-          currentOrganization: { organizationId: 'org-acme', pluginPrefix: null },
+          currentOrganization: { organizationId: 'org-acme', pluginPrefix: null, orgSlug: 'acme' },
+          namespace: 'acme',
           installOrigin: 'agent-forge',
         }),
       ),
@@ -391,7 +396,8 @@ describe('resolveGhostFirstPartyPrivilege', () => {
             ghostId: 'acme-feishu',
             marketRecord,
             currentOrganization: CURRENT_ORG,
-            installOrigin: 'agent-forge',
+            namespace: 'acme',
+          installOrigin: 'agent-forge',
           }),
         ),
       ).toEqual({
@@ -525,6 +531,23 @@ describe('resolveGhostFirstPartyPrivilege', () => {
     });
   });
 
+  it('denies Forge broker when the install namespace is not the current organization', () => {
+    expect(
+      resolveGhostFirstPartyPrivilege(
+        facts({
+          ghostId: 'helper',
+          namespace: 'acme',
+          currentOrganization: { organizationId: 'org-b', pluginPrefix: 'beta', orgSlug: 'beta' },
+          installOrigin: 'agent-forge',
+        }),
+      ),
+    ).toEqual({
+      brokerEligible: false,
+      hostPrimitiveEligible: false,
+      basis: 'denied-foreign-org',
+    });
+  });
+
   it('fail-closes unknown origin, missing prefix, and unmatched prefix', () => {
     expect(resolveGhostFirstPartyPrivilege(facts({ ghostId: 'mystery' }))).toEqual({
       brokerEligible: false,
@@ -535,7 +558,7 @@ describe('resolveGhostFirstPartyPrivilege', () => {
       resolveGhostFirstPartyPrivilege(
         facts({
           ghostId: 'acme-feishu',
-          currentOrganization: { organizationId: 'org-acme', pluginPrefix: null },
+          currentOrganization: { organizationId: 'org-acme', pluginPrefix: null, orgSlug: 'acme' },
         }),
       ),
     ).toEqual({

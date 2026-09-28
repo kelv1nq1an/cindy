@@ -21,7 +21,9 @@ import {
   parsePluginStoragePart,
   PLUGIN_NS_INSTALL_ROOT,
   pluginInstallRelId,
+  pluginStoragePart,
 } from '../../shared/pluginIdentity.js';
+
 
 import {
   GHOST_MANIFEST_FILE,
@@ -63,6 +65,7 @@ import {
   commitNamespaceMigration,
   createNamespaceMigrationStore,
   censusNamespaceMigration,
+  dropNamespaceMigrationEntry,
   type NamespaceCensusCandidate,
   isPendingNamespaceGhost,
   pendingNamespaceGhostIds,
@@ -146,6 +149,13 @@ export const TRUST_METADATA_FILE = '.cindy-trust.json';
 
 function isZipSymbolicLink(entry: JSZip.JSZipObject): boolean {
   return isZipSymbolicLinkMode(entry.unixPermissions);
+}
+
+function relIdFromUpdatingBackupName(name: string): string | null {
+  const match = /^\.cindy-updating-(.+)-[0-9a-f]{8}$/.exec(name);
+  if (!match) return null;
+  const identity = parsePluginStoragePart(match[1]);
+  return identity ? pluginInstallRelId(identity) : null;
 }
 
 /** 只有宿主安装/播种路径可以写入的 Cindy 官方身份。 */
@@ -1142,9 +1152,8 @@ export class GhostManager {
       (entry) => entry.name.startsWith('.cindy-updating-') && !handledBackupNames.has(entry.name),
     );
     for (const entry of backups) {
-      const match = /^\.cindy-updating-(.+)-[0-9a-f]{8}$/.exec(entry.name);
-      if (!match || !isValidGhostId(match[1])) continue;
-      const id = match[1];
+      const id = relIdFromUpdatingBackupName(entry.name);
+      if (!id) continue;
       if (blockedMutationIds.has(id)) continue;
       const backupPath = path.join(root, entry.name);
       try {
@@ -1157,10 +1166,7 @@ export class GhostManager {
       // `.cindy-updating-foo-<hex>` 是 `.cindy-updating-foo-bar-<hex>` 的前缀,
       // 若用前缀匹配,foo 与 foo-bar 同时留有 backup 时,foo 的唯一 backup 会被
       // 误统计成多个而判为"多备份,留待人工",崩溃后 foo 持续消失(评审 P1)。
-      const siblings = backups.filter((other) => {
-        const otherMatch = /^\.cindy-updating-(.+)-[0-9a-f]{8}$/.exec(other.name);
-        return otherMatch !== null && otherMatch[1] === id;
-      });
+      const siblings = backups.filter((other) => relIdFromUpdatingBackupName(other.name) === id);
       let finalKind: GhostDirEntryKind | 'missing';
       try {
         finalKind = classifyGhostDirEntrySync(finalDir);
@@ -3017,7 +3023,7 @@ export class GhostManager {
     // 5) 解压到 staging(zip-slip / zip bomb 防御),全过才切正式目录
     const stagingDir = path.join(
       root,
-      `.cindy-installing-${manifest.id}-${crypto.randomBytes(4).toString('hex')}`,
+      `.cindy-installing-${pluginStoragePart(identity)}-${crypto.randomBytes(4).toString('hex')}`,
     );
     const receiptRevision = crypto.randomUUID();
     // receipt 在内容落到 finalDir 之后才创建:技能字节指纹必须从这次批准的内容
@@ -3271,8 +3277,9 @@ export class GhostManager {
     }
 
     const rand = crypto.randomBytes(4).toString('hex');
-    const stagingDir = path.join(root, `.cindy-installing-${manifest.id}-${rand}`);
-    const backupDir = path.join(root, `.cindy-updating-${manifest.id}-${rand}`);
+    const workName = pluginStoragePart(parsePluginInstallRelId(relId) ?? identity);
+    const stagingDir = path.join(root, `.cindy-installing-${workName}-${rand}`);
+    const backupDir = path.join(root, `.cindy-updating-${workName}-${rand}`);
     try {
       await this.extractToStaging(allEntries, prefix, stagingDir, {
         disabled: !enabled,
@@ -3934,6 +3941,20 @@ export class GhostManager {
     return this.runExclusiveMutation(() => this.uninstallUnlocked(id, options));
   }
 
+
+  private forgetPendingNamespaceMigration(ghostId: string): void {
+    const read = this.namespaceMigrationStore().read();
+    if (read.kind !== 'ok' || !(ghostId in read.ledger.entries)) return;
+    try {
+      this.namespaceMigrationStore().write(dropNamespaceMigrationEntry(read.ledger, ghostId));
+    } catch (error) {
+      this.options.log?.warn('namespace migration pending drop failed', {
+        ghostId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
   private async uninstallUnlocked(
     id: string,
     options: GhostUninstallOptions = {},
@@ -4002,6 +4023,9 @@ export class GhostManager {
       this.options.log?.warn('ghost uninstall left journal for approval cleanup', { id: relId });
     }
     this.options.log?.info('ghost uninstalled', { id: relId });
+    if (relId === identity.ghostId) {
+      this.forgetPendingNamespaceMigration(identity.ghostId);
+    }
     if (options.notify !== false) this.options.onChanged?.(this.list());
     return { ok: true };
   }

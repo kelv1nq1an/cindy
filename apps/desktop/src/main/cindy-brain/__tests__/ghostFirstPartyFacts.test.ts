@@ -24,11 +24,13 @@ const PERSONAL: GhostFirstPartyFactsIdentity = {
 const ORG_A: GhostFirstPartyFactsIdentity = {
   membershipKind: 'org',
   orgId: 'org-a',
+  orgSlug: 'slug-a',
 };
 
 const ORG_B: GhostFirstPartyFactsIdentity = {
   membershipKind: 'org',
   orgId: 'org-b',
+  orgSlug: 'slug-b',
 };
 
 const MARKET_ROW: PluginMarketInstallationRecord = {
@@ -80,6 +82,7 @@ describe('loadGhostFirstPartyFactsLoader', () => {
       if (loaded.kind !== 'ready') continue;
       expect(loaded.facts).toEqual({
         ghostId,
+        namespace: null,
         builtin: true,
         marketRecord: null,
         currentOrganization: null,
@@ -215,6 +218,7 @@ describe('loadGhostFirstPartyFactsLoader', () => {
       kind: 'ready',
       facts: {
         ghostId: 'local-tool',
+        namespace: null,
         builtin: false,
         marketRecord: null,
         currentOrganization: null,
@@ -267,7 +271,7 @@ describe('loadGhostFirstPartyFactsLoader', () => {
       facts: {
         marketRecord: null,
         installOrigin: 'agent-forge',
-        currentOrganization: { organizationId: 'org-a', pluginPrefix: 'acme' },
+        currentOrganization: { organizationId: 'org-a', pluginPrefix: 'acme', orgSlug: 'slug-a' },
       },
     });
   });
@@ -297,9 +301,10 @@ describe('loadGhostFirstPartyFactsLoader', () => {
       kind: 'ready',
       facts: {
         ghostId: 'acme-tool',
+        namespace: null,
         builtin: false,
         marketRecord: null,
-        currentOrganization: { organizationId: 'org-a', pluginPrefix: 'acme' },
+        currentOrganization: { organizationId: 'org-a', pluginPrefix: 'acme', orgSlug: 'slug-a' },
         installOrigin: 'manual',
       },
     });
@@ -316,6 +321,7 @@ describe('loadGhostFirstPartyFactsLoader', () => {
       kind: 'ready',
       facts: {
         ghostId: 'acme-tool',
+        namespace: null,
         builtin: false,
         marketRecord: {
           scope: 'organization',
@@ -325,7 +331,7 @@ describe('loadGhostFirstPartyFactsLoader', () => {
           sha256: MARKET_ROW.sha256,
           approvedPackageSha256: MARKET_ROW.sha256,
         },
-        currentOrganization: { organizationId: 'org-a', pluginPrefix: null },
+        currentOrganization: { organizationId: 'org-a', pluginPrefix: null, orgSlug: 'slug-a' },
         installOrigin: 'manual',
       },
     });
@@ -349,7 +355,7 @@ describe('loadGhostFirstPartyFactsLoader', () => {
           sha256: 'a'.repeat(64),
           approvedPackageSha256: 'b'.repeat(64),
         },
-        currentOrganization: { organizationId: 'org-a', pluginPrefix: 'acme' },
+        currentOrganization: { organizationId: 'org-a', pluginPrefix: 'acme', orgSlug: 'slug-a' },
       },
     });
     expect(MARKET_ROW.manifestDigest).toBe('c'.repeat(64));
@@ -357,6 +363,59 @@ describe('loadGhostFirstPartyFactsLoader', () => {
     // This assertion kills an implementation that drops package SHA and falls
     // back to the unchanged manifestDigest for Broker authorization.
     expect(resolveGhostFirstPartyPrivilege(loaded.facts).brokerEligible).toBe(false);
+  });
+
+  it('reads install namespace from a storage-part ghost id', () => {
+    const loaded = loader({
+      lookupOrganizationPrefix: () => ({ kind: 'known', pluginPrefix: null }),
+    }).load('_ns__slug-a__helper', 'runtime', ORG_A);
+    expect(loaded).toMatchObject({
+      kind: 'ready',
+      facts: { ghostId: 'helper', namespace: 'slug-a' },
+    });
+  });
+
+  it('lets install-time namespace override win over a free-name ghost id', () => {
+    const factsLoader = loader({
+      lookupOrganizationPrefix: () => ({ kind: 'known', pluginPrefix: null }),
+    });
+    const denied = factsLoader.load('helper', 'install', ORG_A, {
+      installOrigin: 'agent-forge',
+    });
+    expect(denied).toMatchObject({
+      kind: 'ready',
+      facts: { ghostId: 'helper', namespace: null, installOrigin: 'agent-forge' },
+    });
+    if (denied.kind === 'ready') {
+      expect(authorizeGhostTokenBroker('helper', denied)).toBe(false);
+      expect(resolveGhostFirstPartyPrivilege(denied.facts).basis).toBe('denied-foreign-org');
+    }
+
+    const granted = factsLoader.load('helper', 'install', ORG_A, {
+      installOrigin: 'agent-forge',
+      namespace: 'slug-a',
+    });
+    expect(granted).toMatchObject({
+      kind: 'ready',
+      facts: { ghostId: 'helper', namespace: 'slug-a', installOrigin: 'agent-forge' },
+    });
+    if (granted.kind === 'ready') {
+      expect(authorizeGhostTokenBroker('helper', granted)).toBe(true);
+      expect(resolveGhostFirstPartyPrivilege(granted.facts)).toEqual({
+        brokerEligible: true,
+        hostPrimitiveEligible: false,
+        basis: 'forge-current-org',
+      });
+    }
+
+    const explicitRoot = factsLoader.load('_ns__slug-a__helper', 'install', ORG_A, {
+      installOrigin: 'agent-forge',
+      namespace: null,
+    });
+    expect(explicitRoot).toMatchObject({
+      kind: 'ready',
+      facts: { ghostId: 'helper', namespace: null },
+    });
   });
 
   it('binds pending organization-market authorization to the inspected package bytes', () => {
@@ -371,12 +430,13 @@ describe('loadGhostFirstPartyFactsLoader', () => {
       kind: 'ready' as const,
       facts: {
         ghostId: 'acme-tool',
+        namespace: null,
         builtin: false,
         marketRecord: bindPendingMarketRecordToInspectedPackage(
           pending,
           inspectedPackageSha256,
         ),
-        currentOrganization: { organizationId: 'org-a', pluginPrefix: 'acme' },
+        currentOrganization: { organizationId: 'org-a', pluginPrefix: 'acme', orgSlug: 'slug-a' },
         installOrigin: 'manual' as const,
       },
     });

@@ -61,9 +61,10 @@ describe('Forge OIDC install entry wiring', () => {
     expect(lease).toBeGreaterThan(lock);
   });
 
-  it('tokenBroker 只在企业身份下拿 Forge facts，且不触发 OIDC 确认窗', () => {
+  it('tokenBroker 拿 Forge facts 时带上当前组织 namespace，且不触发 OIDC 确认窗', () => {
     const body = forgeInstallBody();
-    expect(body).toContain('installOrigin ? { installOrigin } : undefined');
+    expect(body).toContain('...(installOrigin ? { installOrigin } : {})');
+    expect(body).toContain('namespace: forgeNamespace ?? null');
     expect(body).toContain('forgeOidcInstallConfirmFacts(');
   });
 

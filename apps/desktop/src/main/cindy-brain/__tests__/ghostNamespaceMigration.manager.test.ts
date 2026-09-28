@@ -139,6 +139,16 @@ describe('GhostManager namespace migration census', () => {
     expect(ghost?.dir).toBe(path.join(rootDir, 'hello'));
   });
 
+  it('lets a root reinstall proceed after uninstalling a pending legacy install', async () => {
+    await plantLegacyInstall('hello');
+    manager.list();
+    await expect(manager.uninstall('hello', { notify: false })).resolves.toEqual({ ok: true });
+    const cindy = await makeCindy('hello');
+    await expect(manager.install(cindy)).resolves.toMatchObject({
+      ghost: { manifest: { id: 'hello' } },
+    });
+  });
+
   it('blocks a same-name organization install while the root instance is still pending', async () => {
     await plantLegacyInstall('hello');
     manager.list();
