@@ -462,6 +462,7 @@ import { isCindyOverrideModelAllowed } from './cindyOverrideWhitelist.js';
 import {
   isGhostDisabledForWorkdir,
   listDisabledGhostIdsForWorkdir,
+  relocateGhostWorkdirPrefs,
   setGhostDisabledForWorkdir,
 } from './ghostWorkdirPrefs.js';
 import {
@@ -1416,6 +1417,7 @@ async function relocateGhostUserData(fromPart: string, toPart: string): Promise<
     await getGhostLibraryBindingStore().relocateBinding(fromPart, toPart);
     bindingMoved = true;
     await ledger.relocateGhostMediaRefs(fromPart, toPart);
+    await relocateGhostWorkdirPrefs(fromPart, toPart);
   } catch (error) {
     if (bindingMoved) {
       try {

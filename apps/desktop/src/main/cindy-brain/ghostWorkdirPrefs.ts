@@ -77,6 +77,7 @@ const store = createOverrideSettingsFile<GhostWorkdirPrefs>({
   normalize,
   log,
   label: 'ghost-workdir-prefs',
+  preserveUnreadableFile: true,
 });
 
 function readPrefs(): GhostWorkdirPrefs {
@@ -109,6 +110,19 @@ export function setGhostDisabledForWorkdir(workdir: string, ghostId: string, dis
   store.writePatch({ disabledByWorkdir: next });
   log.info('ghost workdir pref updated', { workdirKey: key, ghostId, disabled });
   return next[key] ?? [];
+}
+
+/** 原位组织插件改用 namespace 物理 ID 时，保留各项目的禁用例外。 */
+export async function relocateGhostWorkdirPrefs(fromPart: string, toPart: string): Promise<void> {
+  if (fromPart === toPart) return;
+  await store.updateAtomic(({ value }) => {
+    const next = { ...value.disabledByWorkdir };
+    for (const [workdir, disabled] of Object.entries(next)) {
+      if (!disabled.includes(fromPart)) continue;
+      next[workdir] = [...new Set([...disabled.filter((id) => id !== fromPart), toPart])].sort();
+    }
+    return { disabledByWorkdir: next };
+  });
 }
 
 /** 测试钩子(仅纯函数;读写链路由 IPC / 生效点测试覆盖)。 */

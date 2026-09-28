@@ -4,14 +4,66 @@
  * 兜底)见 mcp-integrations/__tests__/ghostWorkdirGate.test.ts。
  */
 
-import { describe, it, expect, vi } from 'vitest';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
+
+const scope = vi.hoisted(() => ({ dir: '' }));
 
 vi.mock('electron', () => ({ app: { getPath: () => '/tmp/never-used-here' } }));
 vi.mock('../../maker-host/logger-adapter.js', () => ({
   desktopMakerLogger: { child: () => ({ info: () => {}, warn: () => {}, error: () => {} }) },
 }));
+vi.mock('../../appSessionState.js', () => ({
+  ownerScopedUserDataPath: (...parts: string[]) => path.join(scope.dir, ...parts),
+}));
 
-const { __testing } = await import('../ghostWorkdirPrefs');
+const {
+  __testing, setGhostDisabledForWorkdir, listDisabledGhostIdsForWorkdir,
+  relocateGhostWorkdirPrefs,
+} = await import('../ghostWorkdirPrefs');
+
+describe('relocateGhostWorkdirPrefs', () => {
+  beforeEach(() => {
+    scope.dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cindy-ghost-prefs-relocate-'));
+  });
+
+  afterEach(() => {
+    fs.rmSync(scope.dir, { recursive: true, force: true });
+  });
+
+  it('moves disabled projects to the namespaced identity without disabling a new root plugin', async () => {
+    setGhostDisabledForWorkdir('/project/a', 'helper', true);
+    setGhostDisabledForWorkdir('/project/b', 'helper', true);
+    await relocateGhostWorkdirPrefs('helper', '_ns__acme__helper');
+    expect(listDisabledGhostIdsForWorkdir('/project/a')).toEqual(['_ns__acme__helper']);
+    expect(listDisabledGhostIdsForWorkdir('/project/b')).toEqual(['_ns__acme__helper']);
+    await relocateGhostWorkdirPrefs('helper', '_ns__acme__helper');
+    expect(listDisabledGhostIdsForWorkdir('/project/a')).toEqual(['_ns__acme__helper']);
+  });
+
+  it('preserves existing destination disables and unrelated plugin preferences', async () => {
+    setGhostDisabledForWorkdir('/project/a', 'helper', true);
+    setGhostDisabledForWorkdir('/project/a', 'another', true);
+    setGhostDisabledForWorkdir('/project/a', '_ns__acme__helper', true);
+    setGhostDisabledForWorkdir('/project/b', '_ns__acme__helper', true);
+    await relocateGhostWorkdirPrefs('helper', '_ns__acme__helper');
+    expect(listDisabledGhostIdsForWorkdir('/project/a')).toEqual(['_ns__acme__helper', 'another']);
+    expect(listDisabledGhostIdsForWorkdir('/project/b')).toEqual(['_ns__acme__helper']);
+  });
+
+  it('does not overwrite unreadable preferences; retry succeeds once repaired', async () => {
+    setGhostDisabledForWorkdir('/project/a', 'helper', true);
+    const file = path.join(scope.dir, 'ghost-workdir-prefs.json');
+    fs.writeFileSync(file, '{bad json');
+    await expect(relocateGhostWorkdirPrefs('helper', '_ns__acme__helper')).rejects.toThrow(/unreadable/);
+    expect(fs.readFileSync(file, 'utf8')).toBe('{bad json');
+    fs.writeFileSync(file, JSON.stringify({ disabledByWorkdir: { '/project/a': ['helper'] } }));
+    await relocateGhostWorkdirPrefs('helper', '_ns__acme__helper');
+    expect(listDisabledGhostIdsForWorkdir('/project/a')).toEqual(['_ns__acme__helper']);
+  });
+});
 
 describe('normalizeWorkdirKey(纯字符串归一化,不碰 fs)', () => {
   it('Windows 形态:统一反斜杠、去尾分隔符、小写折叠', () => {
