@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import type { InstalledGhost } from '../../../shared/ghost.js';
 import { GhostManager } from '../GhostManager.js';
+import { classifyNamespaceMigration, readNamespaceMigrationMarketRecord } from '../ghostNamespaceMigration.js';
 import {
   GhostInstallReceiptStore,
   createGhostInstallReceipt,
@@ -104,6 +105,38 @@ async function makeCindy(id: string): Promise<string> {
 }
 
 describe('GhostManager namespace migration census', () => {
+  it('waits for a failed market read before committing an old organization install', async () => {
+    await plantLegacyInstall('hello');
+    let readFails = true;
+    let commits = 0;
+    manager = new GhostManager({
+      getRootDir: () => rootDir,
+      classifyPendingNamespace: (ghostId, marketSyncCompleted = false) => classifyNamespaceMigration({
+        ghostId,
+        builtin: false,
+        installOrigin: 'manual',
+        marketSyncCompleted,
+        marketRecord: readNamespaceMigrationMarketRecord(() => {
+          if (readFails) throw new Error('locked ledger');
+          return [{ scope: 'organization', source: 'market', organizationId: 'org-acme' }];
+        }),
+        currentOrganization: { organizationId: 'org-acme', orgSlug: 'acme', pluginPrefix: 'acme' },
+      }),
+      onNamespaceCommitted: () => { commits += 1; },
+    });
+
+    await manager.reconcilePendingRootNamespaces(true);
+    expect(manager.list()[0]).toMatchObject({ namespaceMigration: 'pending' });
+    expect(manager.list()[0]?.namespace).toBeUndefined();
+    expect(commits).toBe(0);
+
+    readFails = false;
+    await manager.reconcilePendingRootNamespaces(true);
+    expect(manager.list()[0]).toMatchObject({ namespace: 'acme' });
+    expect(manager.list()[0]?.namespaceMigration).toBeUndefined();
+    expect(commits).toBe(1);
+  });
+
   it('captures only verified recovered legacy installs after the initial empty census', async () => {
     await fs.promises.mkdir(rootDir, { recursive: true });
     expect(manager.list()).toEqual([]);

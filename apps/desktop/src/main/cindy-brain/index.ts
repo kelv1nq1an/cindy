@@ -130,7 +130,7 @@ import {
   hasDeliveryNamespace,
   deliveryNamespaceFields,
 } from '../../shared/pluginIdentity.js';
-import { classifyNamespaceMigration } from './ghostNamespaceMigration.js';
+import { classifyNamespaceMigration, readNamespaceMigrationMarketRecord } from './ghostNamespaceMigration.js';
 import {
   clearBuiltinTombstone,
   listEligibleBuiltinCommands,
@@ -2941,25 +2941,9 @@ function classifyPendingNamespaceForGhost(
     getGhostManager()
       .list()
       .some((ghost) => ghost.manifest.id === ghostId && ghost.builtin === true);
-  let marketRecord: {
-    scope: 'public' | 'personal' | 'organization';
-    source: 'market' | 'legacy-adopted' | 'git-market' | 'local-market';
-    organizationId: string | null;
-    namespace?: string | null;
-  } | null = null;
-  try {
-    const record = getPluginMarketLedger().installationForGhost(ghostId);
-    if (record) {
-      marketRecord = {
-        scope: record.scope,
-        source: record.source,
-        organizationId: record.organizationId,
-        ...deliveryNamespaceFields(record),
-      };
-    }
-  } catch {
-    marketRecord = null;
-  }
+  const marketRecord = readNamespaceMigrationMarketRecord(() =>
+    getPluginMarketLedger().installationsForGhost(ghostId),
+  );
   const state = getAuthState();
   const user = state.isAuthenticated ? state.user : null;
   let currentOrganization: {

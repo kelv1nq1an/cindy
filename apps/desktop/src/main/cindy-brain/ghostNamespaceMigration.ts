@@ -74,12 +74,24 @@ export interface ClassifyNamespaceMigrationInput {
     source: 'market' | 'legacy-adopted' | 'git-market' | 'local-market';
     organizationId: string | null;
     namespace?: string | null;
-  } | null;
+  } | null | undefined;
   currentOrganization: {
     organizationId: string;
     orgSlug: string | null;
     pluginPrefix: string | null;
   } | null;
+}
+
+export function readNamespaceMigrationMarketRecord(
+  readRecords: () => readonly NonNullable<ClassifyNamespaceMigrationInput['marketRecord']>[],
+): ClassifyNamespaceMigrationInput['marketRecord'] {
+  try {
+    const records = readRecords();
+    if (records.length === 0) return null;
+    return records.length === 1 ? records[0] : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -172,6 +184,9 @@ export function classifyNamespaceMigration(
   input: ClassifyNamespaceMigrationInput,
 ): NamespaceClassification {
   const record = input.marketRecord;
+  if (record === undefined) {
+    return { kind: 'pending', reason: 'awaiting-market-facts' };
+  }
   if (record) {
     const recordState = resolvePluginNamespaceState(record);
     if (recordState.kind === 'known') {

@@ -15,6 +15,7 @@ import {
   parseNamespaceMigrationLedger,
   pendingNamespaceGhostIds,
   planNamespaceCommit,
+  readNamespaceMigrationMarketRecord,
   resolveInstallAgainstPending,
   type ClassifyNamespaceMigrationInput,
   type NamespaceCensusCandidate,
@@ -195,6 +196,29 @@ describe('classifyNamespaceMigration', () => {
       basis: 'manual-after-sync',
     });
   });
+
+  it('keeps old installs pending when market records cannot be read or resolved', () => {
+    const organizationRecord = { scope: 'organization' as const, source: 'market' as const, organizationId: 'org-xd' };
+    const unavailable = readNamespaceMigrationMarketRecord(() => { throw new Error('locked ledger'); });
+    const ambiguous = readNamespaceMigrationMarketRecord(() => [organizationRecord, organizationRecord]);
+    expect(unavailable).toBeUndefined();
+    expect(ambiguous).toBeUndefined();
+    expect(readNamespaceMigrationMarketRecord(() => [])).toBeNull();
+    expect(classify({ ghostId: 'xd-feishu', marketSyncCompleted: true, marketRecord: unavailable })).toEqual({
+      kind: 'pending',
+      reason: 'awaiting-market-facts',
+    });
+    expect(classify({ ghostId: 'xd-feishu', marketSyncCompleted: true, marketRecord: ambiguous })).toEqual({
+      kind: 'pending',
+      reason: 'awaiting-market-facts',
+    });
+    expect(classify({
+      ghostId: 'xd-feishu',
+      marketSyncCompleted: true,
+      marketRecord: readNamespaceMigrationMarketRecord(() => [organizationRecord]),
+      currentOrganization: { organizationId: 'org-xd', orgSlug: 'xd', pluginPrefix: 'xd' },
+    })).toEqual({ kind: 'commit', namespace: 'xd', basis: 'market-organization' });
+  });
 });
 
 describe('commit and install conflict', () => {
@@ -336,4 +360,3 @@ describe('planNamespaceCommit', () => {
     });
   });
 });
-
