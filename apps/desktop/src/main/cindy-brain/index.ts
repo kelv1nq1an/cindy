@@ -29,6 +29,12 @@ import { isDeepStrictEqual } from 'node:util';
 import { supportsCindyVersion } from '@cindy/plugin-protocol';
 import { buildGhostRecommendationSnapshot } from './ghostRecommendationSnapshot.js';
 import {
+  isGhostOptionalRelocationSource,
+  prepareGhostOptionalRelocation,
+  readyGhostOptionalRelocation,
+  retryGhostOptionalRelocations,
+} from './ghostOptionalRelocation.js';
+import {
   readGhostRecommendationEntries,
   replaceGhostRecommendations,
   markGhostRecommendationInstalled,
@@ -1446,6 +1452,18 @@ async function relocateGhostUserData(fromPart: string, toPart: string): Promise<
   }
 }
 
+function relocateGhostOptionalHistory(fromId: string, toId: string): void {
+  relocateGhostRecommendations(fromId, toId);
+  relocateGhostRecentUsage(fromId, toId);
+}
+
+function logGhostOptionalRelocationError(error: unknown, fromId: string): void {
+  log.warn('ghost optional history relocation deferred', {
+    fromId,
+    error: error instanceof Error ? error.message : String(error),
+  });
+}
+
 /** 单轮对账:一次性 legacy 迁移 → 播种 → (有变化时)广播 + 首装停靠 + 常驻点火。 */
 async function reconcileBuiltinGhosts(
   reason: string,
@@ -1768,12 +1786,12 @@ export function getGhostManager(): GhostManager {
           if (!fromIdentity || !toIdentity) {
             throw new Error('relocate identities are invalid');
           }
-          await relocateGhostUserData(
-            pluginStoragePart(fromIdentity),
-            pluginStoragePart(toIdentity),
-          );
-          relocateGhostRecommendations(pluginStoragePart(fromIdentity), pluginStoragePart(toIdentity));
-          relocateGhostRecentUsage(pluginStoragePart(fromIdentity), pluginStoragePart(toIdentity));
+          const fromPart = pluginStoragePart(fromIdentity);
+          const toPart = pluginStoragePart(toIdentity);
+          prepareGhostOptionalRelocation(fromPart, toPart);
+          await relocateGhostUserData(fromPart, toPart);
+          readyGhostOptionalRelocation(fromPart, toPart);
+          retryGhostOptionalRelocations(relocateGhostOptionalHistory, logGhostOptionalRelocationError);
         } finally {
           releaseMutation();
         }
@@ -7885,11 +7903,12 @@ export function registerGhostIpc(): void {
       return;
     }
     try {
+      retryGhostOptionalRelocations(relocateGhostOptionalHistory, logGhostOptionalRelocationError);
       event.returnValue = buildGhostRecommendationSnapshot(
         getActiveAppSession().dataOwnerId,
         availableGhosts(),
-        readGhostRecommendationEntries(),
-        loadGhostRecentIds(),
+        readGhostRecommendationEntries().filter((entry) => !isGhostOptionalRelocationSource(entry.id)),
+        loadGhostRecentIds().filter((id) => !isGhostOptionalRelocationSource(id)),
       );
     } catch {
       log.warn('ghost recommendation snapshot unavailable');
@@ -7901,7 +7920,8 @@ export function registerGhostIpc(): void {
   // publisher-owned manifest；同步读保证列表首帧不先按扫描序再跳成最近序。
   ipcMain.on('ghosts:recent-usage', (event) => {
     try {
-      event.returnValue = { ids: loadGhostRecentIds() };
+      retryGhostOptionalRelocations(relocateGhostOptionalHistory, logGhostOptionalRelocationError);
+      event.returnValue = { ids: loadGhostRecentIds().filter((id) => !isGhostOptionalRelocationSource(id)) };
     } catch (error) {
       // 最近使用只是快捷行排序元数据，不得因配置文件损坏 /
       // 权限异常阻断 Plugin 页首屏。main 记录后空历史降级。

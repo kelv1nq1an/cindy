@@ -1,4 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import type { InstalledGhost } from '../../../shared/ghost';
 import { validateGhostManifest } from '../../../shared/ghost';
 import { buildGhostRecommendationSnapshot } from '../ghostRecommendationSnapshot';
@@ -6,18 +9,22 @@ import { buildGhostRecommendationSnapshot } from '../ghostRecommendationSnapshot
 const state = vi.hoisted(() => ({
   owner: 'owner-a',
   buckets: new Map<string, Record<string, unknown>>(),
+  failRecentWrite: false,
+  failRecommendationRead: false,
 }));
-vi.mock('../../appSessionState.js', () => ({ ownerScopedUserDataPath: () => state.owner }));
+vi.mock('../../appSessionState.js', () => ({ ownerScopedUserDataPath: (...parts: string[]) => path.join(state.owner, ...parts) }));
 vi.mock('electron-store', () => ({
   default: class {
-    constructor(private options: { cwd: string; defaults: Record<string, unknown> }) {
+    constructor(private options: { cwd: string; name: string; defaults: Record<string, unknown> }) {
       if (!state.buckets.has(options.cwd))
         state.buckets.set(options.cwd, structuredClone(options.defaults));
     }
     get(key: string) {
+      if (state.failRecommendationRead && this.options.name === 'ghost-recommendations') throw new Error('read unavailable');
       return state.buckets.get(this.options.cwd)?.[key];
     }
     set(key: string, value: unknown) {
+      if (state.failRecentWrite && this.options.name === 'ghost-recent-usage') throw new Error('disk unavailable');
       state.buckets.get(this.options.cwd)![key] = structuredClone(value);
     }
   },
@@ -35,6 +42,12 @@ import {
   markGhostRecentlyUsed,
   relocateGhostRecentUsage,
 } from '../ghostRecentUsageStore';
+import {
+  isGhostOptionalRelocationSource,
+  prepareGhostOptionalRelocation,
+  readyGhostOptionalRelocation,
+  retryGhostOptionalRelocations,
+} from '../ghostOptionalRelocation';
 const item = { id: 'one', label: 'Review email', prompt: 'Review email for me.' };
 const ghost = {
   enabled: true,
@@ -42,6 +55,8 @@ const ghost = {
 } as unknown as InstalledGhost;
 beforeEach(() => {
   state.owner = 'owner-a';
+  state.failRecentWrite = false;
+  state.failRecommendationRead = false;
   state.buckets.set('owner-a', { entries: [], ids: [] });
   state.buckets.set('owner-b', { entries: [], ids: [] });
 });
@@ -115,6 +130,66 @@ describe('plugin recommendation state', () => {
     expect(loadGhostRecentIds()).toEqual(['_ns__acme__helper']);
     relocateGhostRecentUsage('helper', '_ns__acme__helper');
     expect(loadGhostRecentIds()).toEqual(['_ns__acme__helper']);
+  });
+  it('defers failed optional history writes without leaking old root data to a later root install', () => {
+    const owner = fs.mkdtempSync(path.join(os.tmpdir(), 'ghost-optional-history-'));
+    state.owner = owner;
+    state.buckets.set(owner, { entries: [], ids: [] });
+    try {
+      replaceGhostRecommendations('helper', [{ ...item, id: 'old-root' }]);
+      markGhostRecentlyUsed('helper');
+      prepareGhostOptionalRelocation('helper', '_ns__acme__helper');
+      expect(isGhostOptionalRelocationSource('helper')).toBe(true);
+      const move = () => {
+        relocateGhostRecommendations('helper', '_ns__acme__helper');
+        relocateGhostRecentUsage('helper', '_ns__acme__helper');
+      };
+      const failure = vi.fn();
+      retryGhostOptionalRelocations(move, failure);
+      expect(readGhostRecommendationEntries()[0].id).toBe('helper');
+      readyGhostOptionalRelocation('helper', '_ns__acme__helper');
+      state.failRecentWrite = true;
+      retryGhostOptionalRelocations(move, failure);
+      expect(failure).toHaveBeenCalledOnce();
+      expect(isGhostOptionalRelocationSource('helper')).toBe(true);
+      expect(replaceGhostRecommendations('helper', [item])).toEqual({ ok: false, errorCode: 'INTERNAL' });
+      expect(() => markGhostRecentlyUsed('helper')).toThrow('relocation pending');
+      expect(readGhostRecommendationEntries().filter((entry) => !isGhostOptionalRelocationSource(entry.id)))
+        .toEqual([{ id: '_ns__acme__helper', items: [{ ...item, id: 'old-root' }] }]);
+      expect(loadGhostRecentIds().filter((id) => !isGhostOptionalRelocationSource(id))).toEqual([]);
+      state.failRecentWrite = false;
+      retryGhostOptionalRelocations(move, failure);
+      expect(isGhostOptionalRelocationSource('helper')).toBe(false);
+      expect(loadGhostRecentIds()).toEqual(['_ns__acme__helper']);
+      replaceGhostRecommendations('helper', [{ ...item, id: 'new-root' }]);
+      expect(readGhostRecommendationEntries().map((entry) => [entry.id, entry.items?.[0]?.id]))
+        .toEqual([['_ns__acme__helper', 'old-root'], ['helper', 'new-root']]);
+    } finally {
+      state.failRecentWrite = false;
+      fs.rmSync(owner, { recursive: true, force: true });
+    }
+  });
+  it('keeps unreadable optional history pending until a later read succeeds', () => {
+    const owner = fs.mkdtempSync(path.join(os.tmpdir(), 'ghost-optional-history-'));
+    state.owner = owner;
+    state.buckets.set(owner, { entries: [], ids: [] });
+    try {
+      replaceGhostRecommendations('helper', [{ ...item, id: 'old-root' }]);
+      prepareGhostOptionalRelocation('helper', '_ns__acme__helper');
+      readyGhostOptionalRelocation('helper', '_ns__acme__helper');
+      state.failRecommendationRead = true;
+      const failure = vi.fn();
+      retryGhostOptionalRelocations(relocateGhostRecommendations, failure);
+      expect(failure).toHaveBeenCalledOnce();
+      expect(isGhostOptionalRelocationSource('helper')).toBe(true);
+      state.failRecommendationRead = false;
+      retryGhostOptionalRelocations(relocateGhostRecommendations, failure);
+      expect(isGhostOptionalRelocationSource('helper')).toBe(false);
+      expect(readGhostRecommendationEntries()[0].id).toBe('_ns__acme__helper');
+    } finally {
+      state.failRecommendationRead = false;
+      fs.rmSync(owner, { recursive: true, force: true });
+    }
   });
   it('rejects invalid replacement without losing previous tasks', () => {
     replaceGhostRecommendations('example', [item]);

@@ -111,6 +111,14 @@ describe('plugin recommendation recovery', () => {
     expect(markUsed).toHaveBeenCalledWith('_ns__acme__helper');
   });
 
+  it('names the organization instance in commandless suggestion previews and composer text', () => {
+    const root = { manifest: { id: 'helper', name: 'Root' }, dir: '/ghosts/helper', namespace: null };
+    const org = { manifest: { id: 'helper', name: 'Org' }, dir: '/ghosts/_ns/acme/helper', namespace: 'acme' };
+    const translate = (_key: string, options?: Record<string, unknown>) => 'Use ' + options?.id;
+    expect(pluginSuggestionComposerText('Org task', org, translate)).toBe('Org task\n\nUse _ns__acme__helper');
+    expect(pluginSuggestionComposerText('Root task', root, translate)).toBe('Root task\n\nUse helper');
+  });
+
   it('loads project overrides on entry and clears them when choosing global scope', () => {
     const source = readFileSync(
       resolve(__dirname, '../features/plugin/GhostPluginPage.tsx'),

@@ -2,6 +2,7 @@ import Store from 'electron-store';
 import { validateGhostRecommendations, type GhostRecommendation } from '@cindy/plugin-protocol';
 import { ownerScopedUserDataPath } from '../appSessionState.js';
 import { isGhostInstanceId } from '../../shared/pluginIdentity.js';
+import { isGhostOptionalRelocationSource } from './ghostOptionalRelocation.js';
 
 interface Entry {
   id: string;
@@ -48,6 +49,7 @@ export function readGhostRecommendationEntries(): Entry[] {
 
 function update(id: string, patch: Partial<Entry>): void {
   if (!isGhostInstanceId(id)) throw new Error('Invalid plugin identity');
+  if (isGhostOptionalRelocationSource(id)) throw new Error('Plugin history relocation pending');
   const entries = readGhostRecommendationEntries();
   const previous = entries.find((e) => e.id === id);
   store().set('entries', [...entries.filter((e) => e.id !== id), { ...previous, ...patch, id }]);
@@ -78,6 +80,7 @@ export function consumeGhostRecommendationPriority(id: string): void {
 }
 
 export function forgetGhostRecommendations(id: string): void {
+  if (isGhostOptionalRelocationSource(id)) throw new Error('Plugin history relocation pending');
   store().set(
     'entries',
     readGhostRecommendationEntries().filter((e) => e.id !== id),

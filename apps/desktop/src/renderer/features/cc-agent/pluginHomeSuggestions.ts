@@ -1,5 +1,6 @@
 import { localizeGhostRecommendation, type GhostRecommendation } from '@cindy/plugin-protocol';
 import type { HomePluginRecommendationsSnapshot } from '../../../shared/homePluginRecommendations';
+import { installedGhostStoragePart } from '../../../shared/pluginIdentity';
 import {
   HOME_SUGGESTION_CATALOG,
   homeSuggestionLabelKey,
@@ -174,10 +175,10 @@ export function nextHomeTaskBatch(
  */
 export function pluginSuggestionComposerText(
   prompt: string,
-  ghost: { manifest: { id: string; name: string; command?: string } },
+  ghost: { manifest: { id: string; name: string; command?: string }; dir?: string; namespace?: string | null },
   t: (key: string, options?: Record<string, unknown>) => string,
 ): string {
   return ghost.manifest.command
     ? `$${ghost.manifest.command} ${prompt}`
-    : `${prompt}\n\n${t('newChat.pluginSuggestions.usePlugin', { name: ghost.manifest.name, id: ghost.manifest.id })}`;
+    : `${prompt}\n\n${t('newChat.pluginSuggestions.usePlugin', { name: ghost.manifest.name, id: installedGhostStoragePart(ghost) })}`;
 }

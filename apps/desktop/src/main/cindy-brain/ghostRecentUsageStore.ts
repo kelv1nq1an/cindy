@@ -10,6 +10,7 @@ import Store from 'electron-store';
 
 import { isGhostInstanceId } from '../../shared/pluginIdentity.js';
 import { ownerScopedUserDataPath } from '../appSessionState.js';
+import { isGhostOptionalRelocationSource } from './ghostOptionalRelocation.js';
 
 interface GhostRecentUsageShape {
   ids: string[];
@@ -57,6 +58,7 @@ export function loadGhostRecentIds(): string[] {
 
 /** Moves one installed Ghost to the front without accumulating duplicates. */
 export function markGhostRecentlyUsed(id: string): string[] {
+  if (isGhostOptionalRelocationSource(id)) throw new Error('Plugin history relocation pending');
   const next = [id, ...loadGhostRecentIds().filter((candidate) => candidate !== id)].slice(
     0,
     MAX_RECENT_GHOST_IDS,
@@ -67,6 +69,7 @@ export function markGhostRecentlyUsed(id: string): string[] {
 
 /** Removes stale history when a Plugin is explicitly uninstalled. */
 export function forgetGhostRecentUsage(id: string): string[] {
+  if (isGhostOptionalRelocationSource(id)) throw new Error('Plugin history relocation pending');
   const next = loadGhostRecentIds().filter((candidate) => candidate !== id);
   getStore().set('ids', next);
   return next;
