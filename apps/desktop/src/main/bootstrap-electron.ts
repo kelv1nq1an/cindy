@@ -9238,6 +9238,14 @@ app.on('ready', async () => {
         }
         return;
       }
+      if (getActiveAppSession().dataOwnerId === userId) {
+        void getGhostManager().retryInterruptedMutationsAfterDbReady().catch((error) => {
+          dbClientLog.warn('ghost mutation recovery after DB readiness failed', {
+            userId,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        });
+      }
       checkDatabaseSizeWarningAtStartup();
       // Bot recovery is owner-scoped and must start only after DbClient
       // takeover. registerMakerIpc also invokes this once its services exist,

@@ -512,7 +512,7 @@ import {
 // delete require.cache[__filename] 不在 CJS 缓存里——跨 chunk require 会把整个
 // 主进程 bundle 重新求值,启动副作用全量重跑直至 IPC 二次注册抛错,反复触发即
 // 主进程 OOM(2026-07-12 实事故,详见 bootstrap-electron.ts 末尾的缓存自愈注释)。
-import { getDbClient } from '../localDb/client/current.js';
+import { getCurrentDbClientUserId, getDbClient } from '../localDb/client/current.js';
 import * as localDbSchema from '../localDb/schema.js';
 import { eq } from 'drizzle-orm';
 import { requireAppCapability } from '../appCapabilities.js';
@@ -925,6 +925,9 @@ async function retryLegacyGhostRecoveryForActiveSession(): Promise<LegacyGhostRe
           );
           const pending = new Set(backfill.pending ?? []);
           const failed = new Set(backfill.failed);
+          getGhostManager().captureRecoveredLegacyNamespace(
+            recoveredLegacyIds.filter((id) => !pending.has(id) && !failed.has(id)),
+          );
           await acknowledgeRecoveredLegacyGhosts(
             expectedOwner.dataOwnerId,
             recoveredLegacyIds.filter((id) => !pending.has(id) && !failed.has(id)),
@@ -1385,6 +1388,14 @@ function planGhostUserDataRelocation(fromPart: string, toPart: string): Array<{ 
   ].filter((move): move is { from: string; to: string } => move !== null);
 }
 
+function assertGhostRelocationDbReady(): void {
+  const ownerId = getActiveAppSession().dataOwnerId;
+  if (!ownerId || getCurrentDbClientUserId() !== ownerId) {
+    throw new Error('Ghost relocation database owner is not ready');
+  }
+  getDbClient();
+}
+
 async function relocateGhostUserData(fromPart: string, toPart: string): Promise<void> {
   if (fromPart === toPart) return;
   const planned = planGhostUserDataRelocation(fromPart, toPart);
@@ -1697,14 +1708,7 @@ export function getGhostManager(): GhostManager {
         classifyPendingNamespaceForGhost(ghostId, marketSyncCompleted === true),
       isNamespaceMigrationBusy: (ghostId) => isNamespaceMigrationBusy(ghostId),
       onNamespaceCommitted: (ghostId, namespace) => {
-        try {
-          getPluginMarketLedger().stampNamespaceIfAbsent(ghostId, namespace);
-        } catch (error) {
-          log.warn('market ledger namespace stamp failed', {
-            ghostId,
-            error: error instanceof Error ? error.message : String(error),
-          });
-        }
+        getPluginMarketLedger().stampNamespaceIfAbsent(ghostId, namespace);
       },
       onBeforePhysicalRelocate: async (fromRelId) => {
         const ghost = findGhostForInstanceId(fromRelId);
@@ -1719,6 +1723,7 @@ export function getGhostManager(): GhostManager {
         }
       },
       onValidatePhysicalRelocation: async (fromRelId, toRelId) => {
+        assertGhostRelocationDbReady();
         const fromIdentity = parsePluginInstallRelId(fromRelId);
         const toIdentity = parsePluginInstallRelId(toRelId);
         if (!fromIdentity || !toIdentity) throw new Error('relocate identities are invalid');
@@ -1737,6 +1742,7 @@ export function getGhostManager(): GhostManager {
         if (ghost) spawnIfResident(ghost);
       },
       onPhysicalRelocated: async (fromRelId, toRelId) => {
+        assertGhostRelocationDbReady();
         const releaseMutation = beginGhostMutation(captureGhostMutationOwner());
         try {
           const fromIdentity = parsePluginInstallRelId(fromRelId);

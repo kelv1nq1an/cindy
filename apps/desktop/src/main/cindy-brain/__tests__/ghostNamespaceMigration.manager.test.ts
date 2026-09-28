@@ -104,6 +104,44 @@ async function makeCindy(id: string): Promise<string> {
 }
 
 describe('GhostManager namespace migration census', () => {
+  it('captures only verified recovered legacy installs after the initial empty census', async () => {
+    await fs.promises.mkdir(rootDir, { recursive: true });
+    expect(manager.list()).toEqual([]);
+    await plantLegacyInstall('recovered');
+    await plantLegacyInstall('unverified');
+    expect(manager.list().find((ghost) => ghost.manifest.id === 'recovered')?.namespaceMigration).toBeUndefined();
+    manager.captureRecoveredLegacyNamespace(['recovered']);
+    expect(manager.list().find((ghost) => ghost.manifest.id === 'recovered')?.namespaceMigration).toBe('pending');
+    expect(manager.list().find((ghost) => ghost.manifest.id === 'unverified')?.namespaceMigration).toBeUndefined();
+    const orgCindy = await makeCindy('recovered');
+    await expect(manager.install(orgCindy, { namespace: 'acme' })).resolves.toMatchObject({
+      rejection: { code: 'namespace-migration-pending' },
+    });
+  });
+
+  it('keeps a receipt-stamped namespace pending until its market record is stamped', async () => {
+    await plantLegacyInstall('hello');
+    manager.list();
+    let shouldFail = true;
+    manager = new GhostManager({
+      getRootDir: () => rootDir,
+      mutateSnapshot: async ({ parentDir, ...request }) => {
+        await runGhostSnapshotWorkerRequest(request, parentDir);
+      },
+      onNamespaceCommitted: () => {
+        if (shouldFail) throw new Error('market ledger unavailable');
+      },
+    });
+    await expect(manager.commitPendingNamespace('hello', 'acme', 'market-organization'))
+      .rejects.toThrow('market ledger unavailable');
+    expect(manager.list()[0]?.namespaceMigration).toBe('pending');
+    shouldFail = false;
+    await expect(manager.commitPendingNamespace('hello', 'acme', 'market-organization'))
+      .resolves.toEqual({ ok: true });
+    expect(manager.list()[0]?.namespace).toBe('acme');
+    expect(manager.list()[0]?.namespaceMigration).toBeUndefined();
+  });
+
   it('captures a pre-namespace root install as pending and does not treat a later install as pending', async () => {
     await plantLegacyInstall('xd-feishu');
     const listed = manager.list();
@@ -162,6 +200,23 @@ describe('GhostManager namespace migration census', () => {
     await expect(manager.install(orgCindy, { namespace: 'acme' })).resolves.toMatchObject({
       rejection: { code: 'namespace-migration-pending' },
     });
+  });
+
+  it('captures the original receipt when the first census sees an update backup', async () => {
+    await plantLegacyInstall('hello');
+    const receipts = new GhostInstallReceiptStore(() => path.join(workDir, 'ghosts-install-state'));
+    const backupName = '.cindy-updating-hello-deadbeef';
+    await receipts.writePendingMutation('hello', {
+      kind: 'update',
+      packageSha256: 'a'.repeat(64),
+      backupDirName: backupName,
+      phase: 'backed-up',
+    });
+    await fs.promises.rename(path.join(rootDir, 'hello'), path.join(rootDir, backupName));
+    expect(manager.ensureNamespaceMigrationCensus()?.entries.hello?.status).toBe('pending');
+    await fs.promises.rename(path.join(rootDir, backupName), path.join(rootDir, 'hello'));
+    await receipts.clearPendingMutation('hello');
+    expect(manager.list()[0]?.namespaceMigration).toBe('pending');
   });
 
   it('blocks a same-name organization install while the root instance is still pending', async () => {
@@ -327,6 +382,52 @@ describe('GhostManager namespace migration census', () => {
     expect(manager.list()).toEqual([
       expect.objectContaining({ namespace: 'acme', dir: dest }),
     ]);
+  });
+
+  it('retries a failed startup relocation after the database becomes ready', async () => {
+    await plantLegacyInstall('hello');
+    manager.list();
+    await manager.commitPendingNamespace('hello', 'acme', 'market-organization');
+    const dest = path.join(rootDir, '_ns', 'acme', 'hello');
+    await fs.promises.mkdir(path.dirname(dest), { recursive: true });
+    await fs.promises.rename(path.join(rootDir, 'hello'), dest);
+    const receipts = new GhostInstallReceiptStore(
+      () => path.join(workDir, 'ghosts-install-state'),
+      async ({ parentDir, ...request }) => {
+        await runGhostSnapshotWorkerRequest(request, parentDir);
+      },
+    );
+    const current = receipts.read('hello');
+    expect(current.state).toBe('approved');
+    if (current.state !== 'approved') return;
+    await receipts.write(current.receipt, {
+      relId: '_ns/acme/hello',
+      requireSkillSnapshot: false,
+      skillSourceDir: dest,
+    });
+    await receipts.remove('hello');
+    await receipts.writePendingMutation('hello', {
+      kind: 'relocate', fromRelId: 'hello', toRelId: '_ns/acme/hello',
+    });
+    let ready = false;
+    let attempts = 0;
+    manager = new GhostManager({
+      getRootDir: () => rootDir,
+      mutateSnapshot: async ({ parentDir, ...request }) => {
+        await runGhostSnapshotWorkerRequest(request, parentDir);
+      },
+      onPhysicalRelocated: async () => {
+        attempts += 1;
+        if (!ready) throw new Error('DbClient not ready');
+      },
+    });
+    await expect.poll(() => attempts).toBe(1);
+    expect(receipts.readPendingMutationSync('hello').state).toBe('valid');
+    ready = true;
+    await manager.retryInterruptedMutationsAfterDbReady();
+    expect(attempts).toBe(2);
+    expect(receipts.readPendingMutationSync('hello').state).toBe('missing');
+    expect(manager.list()).toEqual([expect.objectContaining({ namespace: 'acme', dir: dest })]);
   });
 
   it('stops the physical instance before renaming it out of the way', async () => {

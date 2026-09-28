@@ -64,6 +64,7 @@ import { readBoundedFileNoFollowSync } from '../utils/readBoundedFile.js';
 import { checkSkillMdConsistency } from './skillSlot.js';
 import {
   commitNamespaceMigration,
+  captureRecoveredNamespaceEntry,
   createNamespaceMigrationStore,
   censusNamespaceMigration,
   dropNamespaceMigrationEntry,
@@ -578,6 +579,8 @@ export class GhostManager {
   private readonly untrustedApprovals = new Set<string>();
   /** Owner namespaces whose mutation journal could not be authoritatively scanned. */
   private readonly recoveryBlockedApprovalNamespaces = new Set<string>();
+  private readonly pendingRecoverySideEffects = new Set<Promise<void>>();
+  private recoveryRetry: Promise<void> | null = null;
 
   /**
    * 进程内隔离集合的键:以**当前 owner 的状态根**为命名空间。集合是 manager 级
@@ -676,6 +679,20 @@ export class GhostManager {
         ...(approval.state === 'approved' ? { identitySource: approval.receipt } : {}),
       });
     }
+    const pending = this.receiptStore.listPendingMutationIdsSync();
+    if (pending.state === 'ok' && !pending.blocked) {
+      const seen = new Set(candidates.map((candidate) => candidate.ghostId));
+      for (const id of pending.ids) {
+        if (!isValidGhostId(id) || seen.has(id)) continue;
+        const marker = this.receiptStore.readPendingMutationSync(id);
+        if (marker.state !== 'valid' || marker.mutation.kind !== 'update') continue;
+        const backup = path.join(root, marker.mutation.backupDirName);
+        if (this.recoveryEntryKind(backup) !== 'directory') continue;
+        const approval = this.receiptStore.readForRecovery(id);
+        if (approval.state !== 'approved') continue;
+        candidates.push({ ghostId: id, relId: id, identitySource: approval.receipt });
+      }
+    }
     return candidates;
   }
 
@@ -705,6 +722,26 @@ export class GhostManager {
   ensureNamespaceMigrationCensus(): NamespaceMigrationLedger | null {
     this.ensureCurrentOwnerContextSync();
     return this.loadNamespaceMigrationLedger();
+  }
+
+  captureRecoveredLegacyNamespace(ids: readonly string[]): void {
+    this.ensureCurrentOwnerContextSync();
+    const ledger = this.loadNamespaceMigrationLedger();
+    if (!ledger) throw new Error('namespace migration census unavailable during legacy recovery');
+    let next = ledger;
+    for (const id of ids) {
+      if (!isValidGhostId(id)) continue;
+      const approval = this.receiptStore.readForRecovery(id);
+      if (approval.state !== 'approved') continue;
+      const dir = path.join(this.contentRootDir(), id);
+      if (this.recoveryEntryKind(dir) !== 'directory') continue;
+      next = captureRecoveredNamespaceEntry(next, {
+        ghostId: id,
+        relId: id,
+        identitySource: approval.receipt,
+      }, new Date().toISOString());
+    }
+    if (next !== ledger) this.namespaceMigrationStore().write(next);
   }
 
   private resolvePendingNamespaceInstall(
@@ -800,17 +837,10 @@ export class GhostManager {
         { skillSourceDir: this.contentPath(ghostId), requireSkillSnapshot: false, relId: ghostId },
       );
     }
+    this.options.onNamespaceCommitted?.(ghostId, plan.namespace);
     this.namespaceMigrationStore().write(
       commitNamespaceMigration(ledger, ghostId, plan.namespace, plan.basis, new Date().toISOString()),
     );
-    try {
-      this.options.onNamespaceCommitted?.(ghostId, plan.namespace);
-    } catch (error) {
-      this.options.log?.warn('namespace committed side effect failed', {
-        ghostId,
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
     this.options.onChanged?.(this.list());
     return { ok: true };
   }
@@ -919,6 +949,26 @@ export class GhostManager {
     this.assertDisjointRoots(this.resolveContentRoot(), this.resolveStateRoot());
     this.ownerContextKey = next;
     this.recoverInterruptedMutationsSync();
+  }
+
+  retryInterruptedMutationsAfterDbReady(): Promise<void> {
+    if (this.recoveryRetry) return this.recoveryRetry;
+    const ownerContextKey = this.currentOwnerContextKey();
+    const retry = (async () => {
+      await Promise.allSettled([...this.pendingRecoverySideEffects]);
+      if (this.currentOwnerContextKey() !== ownerContextKey) return;
+      this.ensureCurrentOwnerContextSync();
+      await Promise.allSettled([...this.pendingRecoverySideEffects]);
+      if (this.currentOwnerContextKey() !== ownerContextKey) return;
+      this.recoverInterruptedMutationsSync();
+      await Promise.allSettled([...this.pendingRecoverySideEffects]);
+    })();
+    this.recoveryRetry = retry;
+    const clearRetry = () => {
+      if (this.recoveryRetry === retry) this.recoveryRetry = null;
+    };
+    void retry.then(clearRetry, clearRetry);
+    return retry;
   }
 
   private currentOwnerContextKey(): string {
@@ -1055,7 +1105,7 @@ export class GhostManager {
             if (sourceApproval.state === 'approved') this.receiptStore.removeSync(marker.fromRelId);
             const relocated = this.options.onPhysicalRelocated?.(marker.fromRelId, marker.toRelId);
             if (relocated && typeof (relocated as Promise<void>).then === 'function') {
-              void (relocated as Promise<void>)
+              const recovery = (relocated as Promise<void>)
                 .then(() => {
                   if (this.currentOwnerContextKey() !== recoveryOwner) return;
                   this.receiptStore.clearPendingMutationSync(id);
@@ -1072,6 +1122,11 @@ export class GhostManager {
                     error: error instanceof Error ? error.message : String(error),
                   });
                 });
+              this.pendingRecoverySideEffects.add(recovery);
+              const clearRecovery = () => {
+                this.pendingRecoverySideEffects.delete(recovery);
+              };
+              void recovery.then(clearRecovery, clearRecovery);
               continue;
             }
           } else if (sourceKind === 'directory') {

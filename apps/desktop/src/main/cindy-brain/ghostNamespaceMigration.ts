@@ -148,6 +148,26 @@ export function dropNamespaceMigrationEntry(
   return { ...ledger, entries };
 }
 
+export function captureRecoveredNamespaceEntry(
+  ledger: NamespaceMigrationLedger,
+  candidate: NamespaceCensusCandidate,
+  now: string,
+): NamespaceMigrationLedger {
+  if (!isCensusCandidate(candidate) || ledger.entries[candidate.ghostId]) return ledger;
+  return {
+    ...ledger,
+    entries: {
+      ...ledger.entries,
+      [candidate.ghostId]: {
+        ghostId: candidate.ghostId,
+        relId: candidate.relId,
+        capturedAt: now,
+        status: 'pending',
+      },
+    },
+  };
+}
+
 export function classifyNamespaceMigration(
   input: ClassifyNamespaceMigrationInput,
 ): NamespaceClassification {
