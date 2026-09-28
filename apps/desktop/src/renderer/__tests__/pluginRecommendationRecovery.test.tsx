@@ -6,6 +6,7 @@ import { act, renderHook } from '@testing-library/react';
 import ts from 'typescript';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { pluginSuggestionComposerText } from '../features/cc-agent/pluginHomeSuggestions';
+import { installedGhostStoragePart } from '../../shared/pluginIdentity';
 
 // Execute the production callbacks without mounting the unrelated full desktop shell.
 function compile(source: string, bindings: Record<string, unknown>) {
@@ -31,7 +32,7 @@ describe('plugin recommendation recovery', () => {
       expect(block).not.toContain('handleSend');
       const suggestion = { id: 'one', pluginId: 'mail', prompt: 'Review my mail' };
       const ghost = { manifest: { id: 'mail', name: 'Mail', command }, enabled: true };
-      const fillComposerWithSuggestion = vi.fn((_text: string) => true);
+      const fillComposerWithSuggestion = vi.fn((text: string) => text.length > 0);
       const markUsed = vi.fn(async () => ({ ids: ['mail'] }));
       vi.stubGlobal('electronAPI', {});
       Object.assign(window, {
@@ -50,6 +51,7 @@ describe('plugin recommendation recovery', () => {
         filterGhostsForWorkdir: (ghosts: unknown[]) => ghosts,
         fillComposerWithSuggestion,
         pluginSuggestionComposerText,
+        installedGhostStoragePart,
         i18n: { language: 'en' },
         t: () => 'Use plugin mail via ghost_info and ghost_call',
         isRemoteProjectDraft: false,
@@ -75,6 +77,39 @@ describe('plugin recommendation recovery', () => {
       expect(markUsed).toHaveBeenCalledWith('mail');
     },
   );
+
+  it('fills the selected organization recommendation rather than the same-name root plugin', async () => {
+    const source = readFileSync(resolve(__dirname, '../features/cc-agent/NewMakerDraftRoute.tsx'), 'utf8');
+    const block = source.slice(source.indexOf('  const runPluginSuggestion ='), source.indexOf('  const handlePluginSuggestion ='));
+    const suggestion = { id: 'plugin:_ns__acme__helper:task', pluginId: '_ns__acme__helper', prompt: 'Org task' };
+    const root = { manifest: { id: 'helper', name: 'Root', command: 'root' }, dir: '/ghosts/helper', enabled: true };
+    const org = { manifest: { id: 'helper', name: 'Org', command: 'org' }, dir: '/ghosts/_ns/acme/helper', namespace: 'acme', enabled: true };
+    const fillComposerWithSuggestion = vi.fn(() => true);
+    const markUsed = vi.fn(async () => ({ ids: ['_ns__acme__helper'] }));
+    Object.assign(window, { electronAPI: { ghosts: { listSync: () => ({ ghosts: [root, org] }), markUsed } } });
+    const run = compile(block + String.fromCharCode(10) + 'return runPluginSuggestion;', {
+      useCallback: (callback: unknown) => callback,
+      sendInFlightRef: { current: false },
+      pluginSuggestionFlight: { current: false },
+      pluginSuggestionMounted: { current: true },
+      currentPluginSuggestionContext: { current: { generation: 1, dataOwnerId: 'owner', targetKey: 'local' } },
+      readPluginRecommendationSnapshot: () => ({ ownerId: 'owner' }),
+      buildHomeTaskCatalog: () => [suggestion],
+      filterGhostsForWorkdir: (ghosts: unknown[]) => ghosts,
+      fillComposerWithSuggestion,
+      pluginSuggestionComposerText,
+      installedGhostStoragePart,
+      i18n: { language: 'en' },
+      t: () => 'Use Org',
+      isRemoteProjectDraft: false,
+      isDeviceLinkDraft: false,
+      navigate: vi.fn(),
+      toast: { error: vi.fn() },
+    });
+    await run({ suggestion, ownerId: 'owner', targetKey: 'local', workingDir: '/project' });
+    expect(fillComposerWithSuggestion).toHaveBeenCalledWith('$org Org task');
+    expect(markUsed).toHaveBeenCalledWith('_ns__acme__helper');
+  });
 
   it('loads project overrides on entry and clears them when choosing global scope', () => {
     const source = readFileSync(

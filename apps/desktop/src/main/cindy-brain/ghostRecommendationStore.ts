@@ -83,3 +83,15 @@ export function forgetGhostRecommendations(id: string): void {
     readGhostRecommendationEntries().filter((e) => e.id !== id),
   );
 }
+
+export function relocateGhostRecommendations(fromId: string, toId: string): void {
+  if (fromId === toId) return;
+  const entries = readGhostRecommendationEntries();
+  const source = entries.find((entry) => entry.id === fromId);
+  if (!source) return;
+  const destination = entries.find((entry) => entry.id === toId);
+  store().set('entries', [
+    ...entries.filter((entry) => entry.id !== fromId && entry.id !== toId),
+    { ...(destination ?? source), id: toId },
+  ]);
+}

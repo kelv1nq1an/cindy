@@ -71,3 +71,10 @@ export function forgetGhostRecentUsage(id: string): string[] {
   getStore().set('ids', next);
   return next;
 }
+
+export function relocateGhostRecentUsage(fromId: string, toId: string): void {
+  if (fromId === toId) return;
+  const current = loadGhostRecentIds();
+  if (!current.includes(fromId)) return;
+  getStore().set('ids', normalizeGhostRecentIds(current.map((id) => id === fromId ? toId : id)));
+}

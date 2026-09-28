@@ -28,7 +28,13 @@ import {
   markGhostRecommendationInstalled,
   consumeGhostRecommendationPriority,
   forgetGhostRecommendations,
+  relocateGhostRecommendations,
 } from '../ghostRecommendationStore';
+import {
+  loadGhostRecentIds,
+  markGhostRecentlyUsed,
+  relocateGhostRecentUsage,
+} from '../ghostRecentUsageStore';
 const item = { id: 'one', label: 'Review email', prompt: 'Review email for me.' };
 const ghost = {
   enabled: true,
@@ -36,8 +42,8 @@ const ghost = {
 } as unknown as InstalledGhost;
 beforeEach(() => {
   state.owner = 'owner-a';
-  state.buckets.set('owner-a', { entries: [] });
-  state.buckets.set('owner-b', { entries: [] });
+  state.buckets.set('owner-a', { entries: [], ids: [] });
+  state.buckets.set('owner-b', { entries: [], ids: [] });
 });
 describe('plugin recommendation state', () => {
   it('replaces, withdraws, preserves install priority and isolates owners', () => {
@@ -65,6 +71,50 @@ describe('plugin recommendation state', () => {
   it('accepts namespaced instance ids used by the pipe binding', () => {
     expect(replaceGhostRecommendations('_ns__xd__helper', [item])).toEqual({ ok: true });
     expect(readGhostRecommendationEntries()[0].id).toBe('_ns__xd__helper');
+  });
+  it('keeps same-name root and organization recommendations and history separate', () => {
+    const root = { ...ghost, manifest: { ...ghost.manifest, id: 'helper', name: 'Root' }, dir: '/ghosts/helper', namespace: null };
+    const org = { ...ghost, manifest: { ...ghost.manifest, id: 'helper', name: 'Org' }, dir: '/ghosts/_ns/acme/helper', namespace: 'acme' };
+    replaceGhostRecommendations('helper', [{ ...item, id: 'root' }]);
+    replaceGhostRecommendations('_ns__acme__helper', [{ ...item, id: 'org' }]);
+    markGhostRecommendationInstalled('_ns__acme__helper');
+    const snapshot = buildGhostRecommendationSnapshot('owner-a', [root, org], readGhostRecommendationEntries(), ['_ns__acme__helper']);
+    expect(snapshot.sources.map((source) => [source.ghostId, source.items?.[0]?.id])).toEqual([
+      ['helper', 'root'], ['_ns__acme__helper', 'org'],
+    ]);
+    expect(snapshot.recentIds).toEqual(['_ns__acme__helper']);
+    expect(snapshot.newlyInstalledId).toBe('_ns__acme__helper');
+  });
+  it('moves an in-place organization recommendation without overwriting destination data', () => {
+    replaceGhostRecommendations('helper', [{ ...item, id: 'source' }]);
+    markGhostRecommendationInstalled('helper');
+    relocateGhostRecommendations('helper', '_ns__acme__helper');
+    expect(readGhostRecommendationEntries()).toEqual([{
+      id: '_ns__acme__helper', items: [{ ...item, id: 'source' }], installedAt: expect.any(Number),
+    }]);
+    relocateGhostRecommendations('helper', '_ns__acme__helper');
+    expect(readGhostRecommendationEntries()).toHaveLength(1);
+    replaceGhostRecommendations('helper', [{ ...item, id: 'later-root' }]);
+    expect(readGhostRecommendationEntries()).toHaveLength(2);
+    replaceGhostRecommendations('_ns__acme__helper', [{ ...item, id: 'destination' }]);
+    relocateGhostRecommendations('helper', '_ns__acme__helper');
+    expect(readGhostRecommendationEntries()).toEqual([{
+      id: '_ns__acme__helper', items: [{ ...item, id: 'destination' }], installedAt: expect.any(Number),
+    }]);
+    consumeGhostRecommendationPriority('_ns__acme__helper');
+    replaceGhostRecommendations('helper', [{ ...item, id: 'later-root' }]);
+    relocateGhostRecommendations('helper', '_ns__acme__helper');
+    expect(readGhostRecommendationEntries()).toEqual([{
+      id: '_ns__acme__helper', items: [{ ...item, id: 'destination' }],
+    }]);
+  });
+  it('transfers recent use to the relocated organization without granting it to a new root', () => {
+    markGhostRecentlyUsed('_ns__acme__helper');
+    markGhostRecentlyUsed('helper');
+    relocateGhostRecentUsage('helper', '_ns__acme__helper');
+    expect(loadGhostRecentIds()).toEqual(['_ns__acme__helper']);
+    relocateGhostRecentUsage('helper', '_ns__acme__helper');
+    expect(loadGhostRecentIds()).toEqual(['_ns__acme__helper']);
   });
   it('rejects invalid replacement without losing previous tasks', () => {
     replaceGhostRecommendations('example', [item]);

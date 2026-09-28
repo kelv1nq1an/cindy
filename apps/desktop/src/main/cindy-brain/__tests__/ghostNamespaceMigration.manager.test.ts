@@ -369,11 +369,26 @@ describe('GhostManager namespace migration census', () => {
     await plantLegacyInstall('hello');
     manager.list();
     await manager.commitPendingNamespace('hello', 'acme', 'market-organization');
+    const committed: string[] = [];
+    manager = new GhostManager({
+      getRootDir: () => rootDir,
+      mutateSnapshot: async ({ parentDir, ...request }) => {
+        await runGhostSnapshotWorkerRequest(request, parentDir);
+      },
+      onPhysicalRelocated: async () => undefined,
+      onPhysicalRelocateCommitted: (toRelId) => {
+        committed.push(toRelId);
+        expect(manager.list()).toEqual([
+          expect.objectContaining({ namespace: 'acme', dir: path.join(rootDir, '_ns', 'acme', 'hello') }),
+        ]);
+      },
+    });
     const rootCindy = await makeCindy('hello');
     await expect(manager.install(rootCindy)).resolves.toMatchObject({
       ghost: { manifest: { id: 'hello' }, dir: path.join(rootDir, 'hello') },
     });
     expect(fs.existsSync(path.join(rootDir, '_ns', 'acme', 'hello', 'ghost.json'))).toBe(true);
+    expect(committed).toEqual(['_ns/acme/hello']);
     expect(manager.list().map((ghost) => [ghost.namespace ?? null, ghost.manifest.id, ghost.dir])).toEqual(
       expect.arrayContaining([
         ['acme', 'hello', path.join(rootDir, '_ns', 'acme', 'hello')],

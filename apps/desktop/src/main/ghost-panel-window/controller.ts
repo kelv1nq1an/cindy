@@ -190,6 +190,20 @@ export class GhostPanelWindowsController {
     return this.getState();
   }
 
+  relocate(fromId: string, toId: string): void {
+    if (fromId === toId) return;
+    const source = this.deps.settings.read().windows[fromId];
+    const destination = this.deps.settings.read().windows[toId];
+    const slot = this.slots.get(fromId);
+    if (slot && !slot.destroyingWindow) this.disposeSlot(fromId, slot);
+    this.deps.settings.removeEntry(fromId);
+    if (source && !destination) {
+      this.deps.settings.patchEntry(toId, { detached: source.detached, lastOpen: false });
+      if (source.detached && source.lastOpen) this.open(toId);
+    }
+    this.broadcast();
+  }
+
   // ── 双阶段就绪 ──────────────────────────────────────────────────────
 
   markRendererReady(sender: WebContents): void {

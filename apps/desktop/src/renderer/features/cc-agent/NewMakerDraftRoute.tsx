@@ -182,6 +182,7 @@ import {
   type HomeTaskSuggestion,
 } from './pluginHomeSuggestions';
 import { useInstalledGhosts } from '@/cindy-brain/useInstalledGhosts';
+import { installedGhostStoragePart } from '../../../shared/pluginIdentity.js';
 import {
   startPendingPluginSuggestion,
   takePendingPluginSuggestion,
@@ -5026,7 +5027,7 @@ export function NewMakerDraftRoute() {
       new Map(
         filterGhostsForWorkdir(installedGhosts, effectiveWorkingDir)
           .filter((g) => g.enabled)
-          .map((g) => [g.manifest.id, g]),
+          .map((g) => [installedGhostStoragePart(g), g]),
       ),
     [effectiveWorkingDir, installedGhosts],
   );
@@ -5110,13 +5111,13 @@ export function NewMakerDraftRoute() {
         }
         const ghost = window.electronAPI.ghosts
           .listSync()
-          .ghosts.find((g) => g.manifest.id === suggestion.pluginId);
+          .ghosts.find((g) => installedGhostStoragePart(g) === suggestion.pluginId);
         const usable =
           ghost && ghost.enabled && filterGhostsForWorkdir([ghost], request.workingDir).length > 0;
         if (!usable) {
           let route: string;
           if (ghost) {
-            route = `/plugins?ghost=${encodeURIComponent(ghost.manifest.id)}`;
+            route = `/plugins?ghost=${encodeURIComponent(installedGhostStoragePart(ghost))}`;
           } else {
             const market = await window.electronAPI.pluginMarket.snapshot();
             if (!stillCurrent() || readPluginRecommendationSnapshot().ownerId !== request.ownerId)
@@ -5140,7 +5141,7 @@ export function NewMakerDraftRoute() {
         // 识别不出所用插件,所以选中插件建议并成功填入即记一次最近使用(有指令的插件发送时
         // 还会再记一次,只刷新时间,不影响排序语义)。
         if (fillComposerWithSuggestion(pluginSuggestionComposerText(suggestion.prompt, ghost, t))) {
-          void window.electronAPI.ghosts.markUsed(ghost.manifest.id).catch(() => undefined);
+          void window.electronAPI.ghosts.markUsed(installedGhostStoragePart(ghost)).catch(() => undefined);
         }
       } catch {
         if (pluginSuggestionMounted.current)

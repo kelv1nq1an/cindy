@@ -34,6 +34,7 @@ import {
   markGhostRecommendationInstalled,
   consumeGhostRecommendationPriority,
   forgetGhostRecommendations,
+  relocateGhostRecommendations,
 } from './ghostRecommendationStore.js';
 
 import { createLogger } from '../logger.js';
@@ -469,6 +470,7 @@ import {
   forgetGhostRecentUsage,
   loadGhostRecentIds,
   markGhostRecentlyUsed,
+  relocateGhostRecentUsage,
 } from './ghostRecentUsageStore.js';
 import { createXaiImageChannel } from './xaiImageClient.js';
 import {
@@ -1746,6 +1748,16 @@ export function getGhostManager(): GhostManager {
       onPhysicalRelocateCommitted: (toRelId) => {
         const ghost = findGhostForInstanceId(toRelId);
         if (ghost) spawnIfResident(ghost);
+        const identity = parsePluginInstallRelId(toRelId);
+        if (identity && identity.namespace !== null) {
+          try {
+            ghostPhysicalRelocationObserver?.(identity.ghostId, pluginStoragePart(identity));
+          } catch (error) {
+            log.warn('ghost panel relocation failed', {
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
+        }
       },
       onPhysicalRelocated: async (fromRelId, toRelId) => {
         assertGhostRelocationDbReady();
@@ -1760,6 +1772,8 @@ export function getGhostManager(): GhostManager {
             pluginStoragePart(fromIdentity),
             pluginStoragePart(toIdentity),
           );
+          relocateGhostRecommendations(pluginStoragePart(fromIdentity), pluginStoragePart(toIdentity));
+          relocateGhostRecentUsage(pluginStoragePart(fromIdentity), pluginStoragePart(toIdentity));
         } finally {
           releaseMutation();
         }
@@ -6562,7 +6576,7 @@ export async function installOrUpdateLocalGhostPackageFromForge(
             ...(forgeNamespace !== undefined ? { namespace: forgeNamespace } : {}),
           }).then((ghost) => {
             try {
-              markGhostRecommendationInstalled(ghost.manifest.id);
+              markGhostRecommendationInstalled(installedGhostStoragePart(ghost));
             } catch {
               log.warn('ghost recommendation install history unavailable');
             }
@@ -9100,6 +9114,13 @@ function scheduleGhostSkillReconcile(): void {
 }
 
 let ghostsChangedObserver: ((ghosts: InstalledGhost[]) => void) | null = null;
+let ghostPhysicalRelocationObserver: ((fromId: string, toId: string) => void) | null = null;
+
+export function setGhostPhysicalRelocationObserver(
+  observer: ((fromId: string, toId: string) => void) | null,
+): void {
+  ghostPhysicalRelocationObserver = observer;
+}
 
 /**
  * bootstrap 注入:装/卸/启停/换版广播的 main 侧同步观察者(当前消费方:插件面板
