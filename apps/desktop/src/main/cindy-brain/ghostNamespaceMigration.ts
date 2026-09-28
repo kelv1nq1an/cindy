@@ -111,10 +111,12 @@ export function censusNamespaceMigration(
     return { kind: 'blocked', reason: existing.kind };
   }
   if (existing.kind === 'ok') {
-    const ledger = pruneAbsentPendingCensusEntries(existing.ledger, candidates);
-    return ledger === existing.ledger
-      ? { kind: 'unchanged', ledger }
-      : { kind: 'created', ledger };
+    // Census is a one-shot capture. Do not drop pending just because the
+    // directory is missing on this scan: update moves it to a dotted backup,
+    // and list() is not serialized with that mutation. Uninstall drops pending
+    // explicitly via dropNamespaceMigrationEntry.
+    void candidates;
+    return { kind: 'unchanged', ledger: existing.ledger };
   }
   const entries: Record<string, NamespaceMigrationEntry> = {};
   for (const candidate of candidates) {
@@ -134,23 +136,6 @@ export function censusNamespaceMigration(
       entries,
     },
   };
-}
-
-export function pruneAbsentPendingCensusEntries(
-  ledger: NamespaceMigrationLedger,
-  candidates: readonly NamespaceCensusCandidate[],
-): NamespaceMigrationLedger {
-  const present = new Set(candidates.map((candidate) => candidate.ghostId));
-  let changed = false;
-  const entries: Record<string, NamespaceMigrationEntry> = {};
-  for (const [ghostId, entry] of Object.entries(ledger.entries)) {
-    if (entry.status === 'pending' && !present.has(ghostId)) {
-      changed = true;
-      continue;
-    }
-    entries[ghostId] = entry;
-  }
-  return changed ? { ...ledger, entries } : ledger;
 }
 
 export function dropNamespaceMigrationEntry(

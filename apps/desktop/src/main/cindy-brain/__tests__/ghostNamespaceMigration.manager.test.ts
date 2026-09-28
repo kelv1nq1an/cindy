@@ -149,6 +149,20 @@ describe('GhostManager namespace migration census', () => {
     });
   });
 
+  it('keeps a pending census while the root directory is in an update backup', async () => {
+    await plantLegacyInstall('hello');
+    manager.list();
+    const live = path.join(rootDir, 'hello');
+    const backup = path.join(rootDir, '.cindy-updating-hello-deadbeef');
+    await fs.promises.rename(live, backup);
+    manager.list();
+    await fs.promises.rename(backup, live);
+    const orgCindy = await makeCindy('hello');
+    await expect(manager.install(orgCindy, { namespace: 'acme' })).resolves.toMatchObject({
+      rejection: { code: 'namespace-migration-pending' },
+    });
+  });
+
   it('blocks a same-name organization install while the root instance is still pending', async () => {
     await plantLegacyInstall('hello');
     manager.list();

@@ -6,7 +6,6 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   censusNamespaceMigration,
   dropNamespaceMigrationEntry,
-  pruneAbsentPendingCensusEntries,
   classifyNamespaceMigration,
   commitNamespaceMigration,
   commitRootNamespaceMigration,
@@ -74,14 +73,13 @@ describe('censusNamespaceMigration', () => {
     );
     expect(again).toEqual({ kind: 'unchanged', ledger: created.ledger });
 
-    const afterUninstall = censusNamespaceMigration(
+    const duringUpdateBackup = censusNamespaceMigration(
       { kind: 'ok', ledger: created.ledger },
-      [candidate('new-plugin')],
+      [],
       '2026-09-23T00:00:00.000Z',
     );
-    expect(afterUninstall.kind).toBe('created');
-    if (afterUninstall.kind !== 'created') return;
-    expect(Object.keys(afterUninstall.ledger.entries)).toEqual([]);
+    expect(duringUpdateBackup).toEqual({ kind: 'unchanged', ledger: created.ledger });
+    expect(dropNamespaceMigrationEntry(created.ledger, 'xd-feishu').entries).toEqual({});
   });
 
   it('does not recensus a corrupt or unreadable ledger', () => {
