@@ -111,13 +111,14 @@ export function findInstalledGhostForMarketItem<
 /** True when this market row is the update/origin route for this installed instance. */
 export function marketItemMatchesInstalledGhost(
   item: Pick<PluginMarketItem, 'ghostId' | 'namespace'>,
-  ghost: { manifest: { id: string }; namespace?: string | null },
+  ghost: { manifest: { id: string }; dir?: string; namespace?: string | null },
 ): boolean {
   if (item.ghostId !== ghost.manifest.id) return false;
   if (hasDeliveryNamespace(item) && hasDeliveryNamespace(ghost)) {
     return item.namespace === ghost.namespace;
   }
-  return true;
+  if (hasDeliveryNamespace(item) && item.namespace !== null) return true;
+  return installedGhostStoragePart(ghost) === item.ghostId;
 }
 
 function installedItemForMarketItem<TInstalled extends { id: string; ghostId?: string }>(

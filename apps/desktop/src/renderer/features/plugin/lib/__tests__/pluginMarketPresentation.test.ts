@@ -284,7 +284,28 @@ describe('marketItemMatchesInstalledGhost', () => {
     expect(
       marketItemMatchesInstalledGhost(
         { ghostId: 'helper' },
-        { manifest: { id: 'helper' }, namespace: 'xd' },
+        { manifest: { id: 'helper' }, namespace: 'xd', dir: '/ghosts/helper' },
+      ),
+    ).toBe(true);
+  });
+
+  it('binds a legacy root market row to the physical root when an enterprise twin exists', () => {
+    const root = { manifest: { id: 'helper' }, namespace: null, dir: '/ghosts/helper' };
+    const enterprise = {
+      manifest: { id: 'helper' },
+      namespace: 'xd',
+      dir: '/ghosts/_ns/xd/helper',
+    };
+    for (const marketItem of [{ ghostId: 'helper' }, { ghostId: 'helper', namespace: null }]) {
+      expect(
+        [enterprise, root].filter((ghost) => marketItemMatchesInstalledGhost(marketItem, ghost)),
+      ).toEqual([root]);
+    }
+    expect(marketItemMatchesInstalledGhost({ ghostId: 'helper', namespace: 'xd' }, enterprise)).toBe(true);
+    expect(
+      marketItemMatchesInstalledGhost(
+        { ghostId: 'helper', namespace: 'xd' },
+        { manifest: { id: 'helper' }, dir: '/ghosts/helper' },
       ),
     ).toBe(true);
   });
