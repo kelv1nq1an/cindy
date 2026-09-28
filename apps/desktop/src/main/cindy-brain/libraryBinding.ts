@@ -297,27 +297,36 @@ export class LibraryBindingStore {
   /** Move a custom binding key after a physical instance relocate. */
   async relocateBinding(fromGhostId: string, toGhostId: string): Promise<void> {
     if (fromGhostId === toGhostId) return;
-    if (!isValidPluginStoragePart(fromGhostId) || !isValidPluginStoragePart(toGhostId)) return;
+    if (!isValidPluginStoragePart(fromGhostId) || !isValidPluginStoragePart(toGhostId)) {
+      throw new Error('library relocate ids are invalid');
+    }
     await this.runSerialized(async () => {
       const data = await this.readData();
       const record = data.bindings[fromGhostId];
-      if (!record || data.bindings[toGhostId]) return;
+      if (!record) return;
+      if (data.bindings[toGhostId]) {
+        throw new Error(`library binding destination already exists: ${toGhostId}`);
+      }
       const fromRoot = path.join(record.root, fromGhostId);
       const toRoot = path.join(record.root, toGhostId);
-      try {
-        if (fs.existsSync(fromRoot) && !fs.existsSync(toRoot)) {
-          await fs.promises.rename(fromRoot, toRoot);
-        }
-      } catch (error) {
-        this.deps.log?.warn('library custom root relocate failed', {
-          fromGhostId,
-          toGhostId,
-          error: error instanceof Error ? error.message : String(error),
-        });
+      if (fs.existsSync(fromRoot) && fs.existsSync(toRoot)) {
+        throw new Error(`library custom root destination already exists: ${toRoot}`);
       }
-      data.bindings[toGhostId] = record;
-      delete data.bindings[fromGhostId];
-      await this.writeData(data);
+      let folderMoved = false;
+      if (fs.existsSync(fromRoot) && !fs.existsSync(toRoot)) {
+        await fs.promises.rename(fromRoot, toRoot);
+        folderMoved = true;
+      }
+      try {
+        data.bindings[toGhostId] = record;
+        delete data.bindings[fromGhostId];
+        await this.writeData(data);
+      } catch (error) {
+        if (folderMoved && fs.existsSync(toRoot) && !fs.existsSync(fromRoot)) {
+          await fs.promises.rename(toRoot, fromRoot);
+        }
+        throw error;
+      }
     });
   }
 

@@ -284,7 +284,7 @@ export class GhostInstallReceiptStore {
     const receiptFile = this.receiptPath(relId);
     await fs.promises.mkdir(path.dirname(receiptFile), { recursive: true });
     try {
-      await this.ensureSkillSnapshot(receipt, options.skillSourceDir);
+      await this.ensureSkillSnapshot(receipt, relId, options.skillSourceDir);
     } catch (error) {
       if (options.requireSkillSnapshot !== false) throw error;
     }
@@ -304,7 +304,7 @@ export class GhostInstallReceiptStore {
     // writer may have observed it and committed the receipt; pathname-based
     // rollback could remove that install's only durable migration guard.
     if (!this.hasMigrationLedger()) {
-      await this.ensureMigrationMarker(this.receiptRelId(receipt));
+      await this.ensureMigrationMarker(relId);
     }
     const target = receiptFile;
     const temp = path.join(
@@ -345,7 +345,7 @@ export class GhostInstallReceiptStore {
     // and transient IO failures remain observable so the caller keeps its journal.
     const snapshotPath = await this.assertManagedSnapshotParent(id, { createMissing: false });
     if (!snapshotPath) return;
-    const parentDir = path.join(this.rootDir(), 'skill-snapshots');
+    const parentDir = path.dirname(snapshotPath);
     const parentStats = await fs.promises.lstat(parentDir, { bigint: true });
     await this.mutateSnapshot({
       parentDir,
@@ -355,7 +355,7 @@ export class GhostInstallReceiptStore {
         ino: parentStats.ino,
       },
       operation: 'remove',
-      targetName: id,
+      targetName: id.split('/').at(-1)!,
     });
   }
 
@@ -403,10 +403,10 @@ export class GhostInstallReceiptStore {
     id: string,
     opts: { createMissing: boolean },
   ): Promise<string | null> {
-    if (!isValidGhostId(id)) throw new Error('invalid ghost id for snapshot path');
+    if (!isValidPluginInstallRelId(id)) throw new Error('invalid ghost id for snapshot path');
     const root = this.rootDir();
     let current = root;
-    for (const segment of ['skill-snapshots', id]) {
+    for (const segment of ['skill-snapshots', ...id.split('/')]) {
       current = path.join(current, segment);
       let kind: Awaited<ReturnType<typeof classifyGhostDirEntry>> | null;
       try {
@@ -441,10 +441,10 @@ export class GhostInstallReceiptStore {
     id: string,
     opts: { createMissing: boolean },
   ): string | null {
-    if (!isValidGhostId(id)) throw new Error('invalid ghost id for snapshot path');
+    if (!isValidPluginInstallRelId(id)) throw new Error('invalid ghost id for snapshot path');
     const root = this.rootDir();
     let current = root;
-    for (const segment of ['skill-snapshots', id]) {
+    for (const segment of ['skill-snapshots', ...id.split('/')]) {
       current = path.join(current, segment);
       let kind: ReturnType<typeof classifyGhostDirEntrySync> | null;
       try {
@@ -911,6 +911,7 @@ export class GhostInstallReceiptStore {
 
   private async ensureSkillSnapshot(
     receipt: GhostInstallReceipt,
+    relId: string,
     skillSourceDir: string | undefined,
   ): Promise<void> {
     const items = receipt.manifest.skill?.items ?? [];
@@ -919,17 +920,20 @@ export class GhostInstallReceiptStore {
     try { await fs.promises.mkdir(snapshotsRoot, { recursive: false }); } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
     }
-    const rootStats = await fs.promises.lstat(snapshotsRoot, { bigint: true });
+    const snapshotParent = await this.assertManagedSnapshotParent(relId, { createMissing: true });
+    if (!snapshotParent) throw new Error('skill snapshot parent unavailable');
+    const parentDir = path.dirname(snapshotParent);
+    const rootStats = await fs.promises.lstat(parentDir, { bigint: true });
     if (!rootStats.isDirectory() || rootStats.isSymbolicLink()) throw new Error('skill snapshot root unavailable');
     await this.mutateSnapshot({
-      parentDir: snapshotsRoot,
+      parentDir,
       expectedParent: {
-        realPath: await fs.promises.realpath(snapshotsRoot),
+        realPath: await fs.promises.realpath(parentDir),
         dev: rootStats.dev,
         ino: rootStats.ino,
       },
       operation: 'ensure',
-      targetName: `${receipt.id}/${receipt.revision}`,
+      targetName: `${relId.split('/').at(-1)}/${receipt.revision}`,
       receipt,
       ...(skillSourceDir ? { sourceDir: skillSourceDir } : {}),
     });

@@ -48,33 +48,37 @@ function manifest(id = 'hello'): Record<string, unknown> {
   };
 }
 
-async function plantLegacyInstall(id: string): Promise<void> {
+async function plantLegacyInstall(id: string, withSkill = false): Promise<void> {
   const dir = path.join(rootDir, id);
   await fs.promises.mkdir(dir, { recursive: true });
-  await fs.promises.writeFile(path.join(dir, 'ghost.json'), JSON.stringify(manifest(id)));
+  const declared = {
+    ...manifest(id),
+    ...(withSkill ? {
+      slots: ['tool', 'skill'],
+      skill: { items: [{ dir: 'skills/demo', name: 'demo', description: 'Demo skill' }] },
+    } : {}),
+  };
+  await fs.promises.writeFile(path.join(dir, 'ghost.json'), JSON.stringify(declared));
   await fs.promises.writeFile(path.join(dir, 'main.js'), '// ok\n');
+  if (withSkill) {
+    await fs.promises.mkdir(path.join(dir, 'skills', 'demo'), { recursive: true });
+    await fs.promises.writeFile(path.join(dir, 'skills', 'demo', 'SKILL.md'),
+      '---\nname: demo\ndescription: Demo skill\n---\n\nDemo\n');
+  }
   const stateRoot = path.join(workDir, 'ghosts-install-state');
   const store = new GhostInstallReceiptStore(
     () => stateRoot,
-    async ({ parentDir, targetName, operation }) => {
-      if (operation === 'remove') {
-        await fs.promises.rm(path.join(parentDir, targetName), { recursive: true, force: true });
-      }
+    async ({ parentDir, ...request }) => {
+      await runGhostSnapshotWorkerRequest(request, parentDir);
     },
   );
-  const normalized = manifest(id) as never;
+  const normalized = declared as never;
+  const approvedManifest = {
+    ...declared,
+  } as InstalledGhost['manifest'];
   await store.write(
     createGhostInstallReceipt({
-      manifest: {
-        schemaVersion: 2,
-        id,
-        name: 'Hello',
-        version: '1.0.0',
-        kind: 'chip',
-        entry: 'main.js',
-        slots: ['tool'],
-        tools: [{ name: 'do_thing', description: 'do' }],
-      } as InstalledGhost['manifest'],
+      manifest: approvedManifest,
       localeResources: {},
       enabled: true,
       trust: {
@@ -83,10 +87,7 @@ async function plantLegacyInstall(id: string): Promise<void> {
         publisherVerified: false,
         reviewed: false,
       },
-      skillContentSha256: await hashApprovedSkillContent(
-        { skill: undefined } as InstalledGhost['manifest'],
-        dir,
-      ),
+      skillContentSha256: await hashApprovedSkillContent(approvedManifest, dir),
     }),
     { skillSourceDir: dir },
   );
@@ -240,6 +241,145 @@ describe('GhostManager namespace migration census', () => {
         [null, 'hello', path.join(rootDir, 'hello')],
       ]),
     );
+  });
+
+  it('retains the relocation journal until interrupted user-data moves succeed', async () => {
+    await plantLegacyInstall('hello');
+    manager.list();
+    await manager.commitPendingNamespace('hello', 'acme', 'market-organization');
+    let calls = 0;
+    manager = new GhostManager({
+      getRootDir: () => rootDir,
+      mutateSnapshot: async ({ parentDir, ...request }) => {
+        await runGhostSnapshotWorkerRequest(request, parentDir);
+      },
+      onPhysicalRelocated: async () => {
+        calls += 1;
+        if (calls === 1) throw new Error('data move interrupted');
+      },
+    });
+    const rootCindy = await makeCindy('hello');
+    await expect(manager.install(rootCindy)).resolves.toMatchObject({
+      rejection: { code: 'io' },
+    });
+    const receipts = new GhostInstallReceiptStore(
+      () => path.join(workDir, 'ghosts-install-state'),
+      async () => undefined,
+    );
+    expect(calls).toBe(1);
+    expect(receipts.readPendingMutationSync('hello').state).toBe('valid');
+    expect(fs.existsSync(path.join(rootDir, 'hello', 'ghost.json'))).toBe(false);
+    expect(fs.existsSync(path.join(rootDir, '_ns', 'acme', 'hello'))).toBe(true);
+    expect(manager.list().some((ghost) => ghost.approval.state === 'approved')).toBe(false);
+    await expect(manager.install(rootCindy)).resolves.toMatchObject({ rejection: { code: 'io' } });
+    expect(receipts.readPendingMutationSync('hello').state).toBe('valid');
+    manager = new GhostManager({
+      getRootDir: () => rootDir,
+      mutateSnapshot: async ({ parentDir, ...request }) => {
+        await runGhostSnapshotWorkerRequest(request, parentDir);
+      },
+      onPhysicalRelocated: async () => { calls += 1; },
+    });
+    await expect.poll(() => receipts.readPendingMutationSync('hello').state).toBe('missing');
+    expect(calls).toBe(2);
+    expect(manager.list()).toEqual([expect.objectContaining({ namespace: 'acme' })]);
+  });
+
+  it('retries user-data relocate when content already moved', async () => {
+    await plantLegacyInstall('hello');
+    manager.list();
+    await manager.commitPendingNamespace('hello', 'acme', 'market-organization');
+    const dest = path.join(rootDir, '_ns', 'acme', 'hello');
+    await fs.promises.mkdir(path.dirname(dest), { recursive: true });
+    await fs.promises.rename(path.join(rootDir, 'hello'), dest);
+    const receipts = new GhostInstallReceiptStore(
+      () => path.join(workDir, 'ghosts-install-state'),
+      async ({ parentDir, ...request }) => {
+        await runGhostSnapshotWorkerRequest(request, parentDir);
+      },
+    );
+    const current = receipts.read('hello');
+    expect(current.state).toBe('approved');
+    if (current.state !== 'approved') return;
+    await receipts.write(current.receipt, {
+      relId: '_ns/acme/hello',
+      requireSkillSnapshot: false,
+      skillSourceDir: dest,
+    });
+    await receipts.remove('hello');
+    await receipts.writePendingMutation('hello', {
+      kind: 'relocate',
+      fromRelId: 'hello',
+      toRelId: '_ns/acme/hello',
+    });
+    let calls = 0;
+    manager = new GhostManager({
+      getRootDir: () => rootDir,
+      mutateSnapshot: async ({ parentDir, ...request }) => {
+        await runGhostSnapshotWorkerRequest(request, parentDir);
+      },
+      onPhysicalRelocated: async () => {
+        calls += 1;
+      },
+    });
+    await expect.poll(() => receipts.readPendingMutationSync('hello').state).toBe('missing');
+    expect(calls).toBe(1);
+    expect(manager.list()).toEqual([
+      expect.objectContaining({ namespace: 'acme', dir: dest }),
+    ]);
+  });
+
+  it('stops the physical instance before renaming it out of the way', async () => {
+    await plantLegacyInstall('hello');
+    manager.list();
+    await manager.commitPendingNamespace('hello', 'acme', 'market-organization');
+    const seen: string[] = [];
+    manager = new GhostManager({
+      getRootDir: () => rootDir,
+      mutateSnapshot: async ({ parentDir, ...request }) => {
+        await runGhostSnapshotWorkerRequest(request, parentDir);
+      },
+      onBeforePhysicalRelocate: (fromRelId) => {
+        seen.push(fromRelId);
+        expect(fs.existsSync(path.join(rootDir, 'hello', 'ghost.json'))).toBe(true);
+        expect(fs.existsSync(path.join(rootDir, '_ns', 'acme', 'hello'))).toBe(false);
+      },
+    });
+    const rootCindy = await makeCindy('hello');
+    await expect(manager.install(rootCindy)).resolves.toMatchObject({
+      ghost: { manifest: { id: 'hello' }, dir: path.join(rootDir, 'hello') },
+    });
+    expect(seen).toEqual(['hello']);
+    expect(fs.existsSync(path.join(rootDir, '_ns', 'acme', 'hello', 'ghost.json'))).toBe(true);
+  });
+
+  it('installs and verifies a namespaced skill snapshot under its physical identity', async () => {
+    const zip = new JSZip();
+    zip.file('ghost.json', JSON.stringify({
+      ...manifest('helper'),
+      slots: ['tool', 'skill'],
+      skill: { items: [{ dir: 'skills/demo', name: 'demo', description: 'Demo skill' }] },
+    }));
+    zip.file('main.js', '// ok\n');
+    zip.file('skills/demo/SKILL.md', '---\nname: demo\ndescription: Demo skill\n---\n\nDemo\n');
+    const filePath = path.join(workDir, 'helper-skill.cindy');
+    await fs.promises.writeFile(filePath, await zip.generateAsync({ type: 'nodebuffer' }));
+    const result = await manager.install(filePath, { namespace: 'acme' });
+    expect(result).toMatchObject({ ghost: { manifest: { id: 'helper' } } });
+    if (!('ghost' in result)) return;
+    expect(result.ghost.approvedSkillRoot).toContain(path.join('_ns', 'acme', 'helper'));
+    await expect(manager.verifyApprovedSkillSnapshot(result.ghost)).resolves.toBe(true);
+  });
+
+  it('keeps a stamped skill approved after vacating for a same-name root install', async () => {
+    await plantLegacyInstall('hello', true);
+    manager.list();
+    await manager.commitPendingNamespace('hello', 'acme', 'market-organization');
+    const rootCindy = await makeCindy('hello');
+    await expect(manager.install(rootCindy)).resolves.toMatchObject({ ghost: { manifest: { id: 'hello' } } });
+    const org = manager.list().find((ghost) => ghost.namespace === 'acme');
+    expect(org).toBeDefined();
+    await expect(manager.verifyApprovedSkillSnapshot(org!)).resolves.toBe(true);
   });
 
   it('treats a later install of the same organization identity as already installed', async () => {

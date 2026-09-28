@@ -1346,76 +1346,69 @@ function migrateGhostKvOnRename(fromId: string, toId: string): void {
 }
 
 function relocateOwnedPath(fromPath: string, toPath: string): void {
-  if (!fs.existsSync(fromPath) || fs.existsSync(toPath)) {
-    if (fs.existsSync(fromPath) && fs.existsSync(toPath) && fromPath !== toPath) {
-      fs.rmSync(fromPath, { recursive: true, force: true });
-    }
-    return;
+  const fromExists = fs.existsSync(fromPath);
+  const toExists = fs.existsSync(toPath);
+  if (!fromExists) return;
+  if (toExists) {
+    throw new Error(`relocate destination already exists: ${toPath}`);
   }
   fs.mkdirSync(path.dirname(toPath), { recursive: true });
   fs.renameSync(fromPath, toPath);
 }
 
-function relocateGhostUserData(fromPart: string, toPart: string): void {
-  if (fromPart === toPart) return;
-  try {
-    const kvDir = ownerScopedUserDataPath('ghost-kv');
-    const fromKv = path.join(kvDir, `${fromPart}.json`);
-    const toKv = path.join(kvDir, `${toPart}.json`);
-    relocateOwnedPath(fromKv, toKv);
-  } catch (error) {
-    log.warn('ghost kv relocate failed', {
-      fromPart,
-      toPart,
-      error: error instanceof Error ? error.message : String(error),
-    });
+function plannedOwnedRelocate(fromPath: string, toPath: string): { from: string; to: string } | null {
+  if (!fs.existsSync(fromPath)) return null;
+  if (fs.existsSync(toPath)) {
+    throw new Error(`relocate destination already exists: ${toPath}`);
   }
-  migrateGhostSecrets(fromPart, toPart);
-  try {
-    relocateOwnedPath(
+  return { from: fromPath, to: toPath };
+}
+
+async function relocateGhostUserData(fromPart: string, toPart: string): Promise<void> {
+  if (fromPart === toPart) return;
+  const kvDir = ownerScopedUserDataPath('ghost-kv');
+  const planned = [
+    plannedOwnedRelocate(path.join(kvDir, `${fromPart}.json`), path.join(kvDir, `${toPart}.json`)),
+    plannedOwnedRelocate(
       ownerScopedUserDataPath('ghost-fs', fromPart),
       ownerScopedUserDataPath('ghost-fs', toPart),
-    );
-  } catch (error) {
-    log.warn('ghost-fs relocate failed', {
-      fromPart,
-      toPart,
-      error: error instanceof Error ? error.message : String(error),
-    });
-  }
-  try {
-    relocateOwnedPath(
+    ),
+    plannedOwnedRelocate(
       ownerScopedUserDataPath('libraries', fromPart),
       ownerScopedUserDataPath('libraries', toPart),
-    );
-  } catch (error) {
-    log.warn('ghost library relocate failed', {
-      fromPart,
-      toPart,
-      error: error instanceof Error ? error.message : String(error),
-    });
-  }
-  try {
-    relocateOwnedPath(
+    ),
+    plannedOwnedRelocate(
       ownerScopedUserDataPath('library-staging', fromPart),
       ownerScopedUserDataPath('library-staging', toPart),
-    );
+    ),
+  ].filter((move): move is { from: string; to: string } => move !== null);
+  const moved: Array<{ from: string; to: string }> = [];
+  let secretsMoved = false;
+  try {
+    for (const move of planned) {
+      relocateOwnedPath(move.from, move.to);
+      moved.push(move);
+    }
+    migrateGhostSecrets(fromPart, toPart);
+    secretsMoved = true;
+    await getGhostLibraryBindingStore().relocateBinding(fromPart, toPart);
   } catch (error) {
-    log.warn('ghost library staging relocate failed', {
-      fromPart,
-      toPart,
-      error: error instanceof Error ? error.message : String(error),
-    });
+    if (secretsMoved) {
+      try {
+        migrateGhostSecrets(toPart, fromPart);
+      } catch {
+        /* keep failing closed on the original error */
+      }
+    }
+    for (const move of moved.reverse()) {
+      try {
+        relocateOwnedPath(move.to, move.from);
+      } catch {
+        /* keep failing closed on the original error */
+      }
+    }
+    throw error;
   }
-  void getGhostLibraryBindingStore()
-    .relocateBinding(fromPart, toPart)
-    .catch((error: unknown) => {
-      log.warn('ghost library binding relocate failed', {
-        fromPart,
-        toPart,
-        error: error instanceof Error ? error.message : String(error),
-      });
-    });
 }
 
 /** 单轮对账:一次性 legacy 迁移 → 播种 → (有变化时)广播 + 首装停靠 + 常驻点火。 */
@@ -1697,11 +1690,41 @@ export function getGhostManager(): GhostManager {
           });
         }
       },
-      onPhysicalRelocated: (fromRelId, toRelId) => {
-        const fromIdentity = parsePluginInstallRelId(fromRelId);
-        const toIdentity = parsePluginInstallRelId(toRelId);
-        if (!fromIdentity || !toIdentity) return;
-        relocateGhostUserData(pluginStoragePart(fromIdentity), pluginStoragePart(toIdentity));
+      onBeforePhysicalRelocate: async (fromRelId) => {
+        const ghost = findGhostForInstanceId(fromRelId);
+        const parts = new Set<string>([fromRelId]);
+        const fromIdentity = parsePluginInstallRelId(fromRelId) ?? parsePluginStoragePart(fromRelId);
+        if (fromIdentity) parts.add(pluginStoragePart(fromIdentity));
+        if (ghost) parts.add(installedGhostStoragePart(ghost));
+        for (const part of parts) {
+          getGhostRuntime().stop(part);
+          await getGhostNodeRuntimeBroker().stopAndWait(part);
+          getGhostRuntime().resetFuse(part);
+        }
+      },
+      onPhysicalRelocateAborted: (fromRelId) => {
+        const ghost = findGhostForInstanceId(fromRelId);
+        if (ghost) spawnIfResident(ghost);
+      },
+      onPhysicalRelocateCommitted: (toRelId) => {
+        const ghost = findGhostForInstanceId(toRelId);
+        if (ghost) spawnIfResident(ghost);
+      },
+      onPhysicalRelocated: async (fromRelId, toRelId) => {
+        const releaseMutation = beginGhostMutation(captureGhostMutationOwner());
+        try {
+          const fromIdentity = parsePluginInstallRelId(fromRelId);
+          const toIdentity = parsePluginInstallRelId(toRelId);
+          if (!fromIdentity || !toIdentity) {
+            throw new Error('relocate identities are invalid');
+          }
+          await relocateGhostUserData(
+            pluginStoragePart(fromIdentity),
+            pluginStoragePart(toIdentity),
+          );
+        } finally {
+          releaseMutation();
+        }
       },
       isTrustedBundledSource,
       recordBuiltinTombstone: (id) => recordBuiltinTombstone(brainRootDir(), id, log),

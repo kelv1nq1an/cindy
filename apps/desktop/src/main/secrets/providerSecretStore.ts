@@ -210,9 +210,11 @@ const electronSecretIo: SecretStorageIo = {
         .readdirSync(secretDir())
         .filter((f) => f.startsWith(prefix) && f.endsWith('.enc'))
         .map((f) => f.slice(prefix.length, -'.enc'.length));
-    } catch {
-      // 目录不存在(尚无任何密钥落盘)等 → 空列表。
-      return [];
+    } catch (err) {
+      if (err instanceof Error && (err as NodeJS.ErrnoException).code === 'ENOENT') {
+        return [];
+      }
+      throw err;
     }
   },
 };
@@ -841,31 +843,49 @@ export function removeGhostSecrets(ghostId: string): void {
   }
 }
 
-/** Best-effort rename of ghost_secret_/ghost_hint_ keys after a physical relocate. */
+/** Rename ghost_secret_/ghost_hint_ keys after a physical relocate. Conflicts fail closed. */
 export function migrateGhostSecrets(fromGhostId: string, toGhostId: string): void {
   if (fromGhostId === toGhostId) return;
   const pairs: Array<[string, string]> = [
     [`${GHOST_SECRET_PREFIX}${fromGhostId}_`, `${GHOST_SECRET_PREFIX}${toGhostId}_`],
     [`${GHOST_SECRET_HINT_PREFIX}${fromGhostId}_`, `${GHOST_SECRET_HINT_PREFIX}${toGhostId}_`],
   ];
+  const moves: Array<{ from: string; to: string; value: string }> = [];
+  for (const key of electronSecretIo.list()) {
+    for (const [fromPrefix, toPrefix] of pairs) {
+      if (!key.startsWith(fromPrefix)) continue;
+      const dest = `${toPrefix}${key.slice(fromPrefix.length)}`;
+      const value = electronSecretIo.read(key);
+      if (value === null) throw new Error('relocate source secret is unreadable');
+      const existing = electronSecretIo.read(dest);
+      if (existing !== null && existing !== value) {
+        throw new Error(`relocate secret destination already exists: ${dest}`);
+      }
+      moves.push({ from: key, to: dest, value });
+      break;
+    }
+  }
+  const completed: Array<{ from: string; to: string; value: string }> = [];
   try {
-    for (const key of electronSecretIo.list()) {
-      for (const [fromPrefix, toPrefix] of pairs) {
-        if (!key.startsWith(fromPrefix)) continue;
-        const dest = `${toPrefix}${key.slice(fromPrefix.length)}`;
-        const value = electronSecretIo.read(key);
-        if (value !== null && electronSecretIo.read(dest) === null) {
-          electronSecretIo.write(dest, value);
-        }
-        electronSecretIo.remove(key);
-        break;
+    for (const move of moves) {
+      if (electronSecretIo.read(move.to) !== move.value && !electronSecretIo.write(move.to, move.value)) {
+        throw new Error(`failed to write relocated secret: ${move.to}`);
+      }
+      if (!electronSecretIo.remove(move.from).success) {
+        throw new Error(`failed to remove relocated secret: ${move.from}`);
+      }
+      completed.push(move);
+    }
+  } catch (error) {
+    for (const move of completed.reverse()) {
+      try {
+        electronSecretIo.write(move.from, move.value);
+        electronSecretIo.remove(move.to);
+      } catch {
+        /* keep failing closed on the original error */
       }
     }
-  } catch (err) {
-    log.warn(
-      { fromGhostId, toGhostId, err: err instanceof Error ? err.message : String(err) },
-      'migrate ghost secrets failed',
-    );
+    throw error;
   }
 }
 

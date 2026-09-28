@@ -17,6 +17,7 @@ import {
   findInstalledGhostByIdentity,
   hasDeliveryNamespace,
   installedGhostLogicalIdentity,
+  isValidPluginInstallRelId,
   parsePluginInstallRelId,
   parsePluginStoragePart,
   PLUGIN_NS_INSTALL_ROOT,
@@ -251,8 +252,14 @@ export interface GhostManagerOptions {
   isNamespaceMigrationBusy?: (ghostId: string) => boolean;
   /** Best-effort side effect after receipt + census ledger commit. */
   onNamespaceCommitted?: (ghostId: string, namespace: string | null) => void;
+  /** Stop runtime/broker for the physical instance before its directory is renamed. */
+  onBeforePhysicalRelocate?: (fromRelId: string) => void | Promise<void>;
+  /** Restore a resident runtime when relocation was cancelled before bytes moved. */
+  onPhysicalRelocateAborted?: (fromRelId: string) => void;
+  /** Restart a resident runtime under its new physical identity after data is committed. */
+  onPhysicalRelocateCommitted?: (toRelId: string) => void;
   /** Fired when an in-place namespaced install is moved to its canonical _ns path. */
-  onPhysicalRelocated?: (fromRelId: string, toRelId: string) => void;
+  onPhysicalRelocated?: (fromRelId: string, toRelId: string) => void | Promise<void>;
   /** sourceDir 是否就是该 id 的随包只读种子目录，而非任意本机可变目录。 */
   isTrustedBundledSource?: (id: string, sourceDir: string) => boolean;
   /** Persist the user's builtin-uninstall intent before approval/content removal. */
@@ -1027,20 +1034,44 @@ export class GhostManager {
             fs.rmSync(finalDir, { recursive: true, force: true });
           }
         } else if (marker.kind === 'relocate') {
+          const sourceIsolation = this.isolationKey(marker.fromRelId);
+          const destIsolation = this.isolationKey(marker.toRelId);
+          const recoveryOwner = this.currentOwnerContextKey();
+          this.untrustedApprovals.add(destIsolation);
           const destDir = path.join(root, ...marker.toRelId.split('/'));
           const sourceDir = path.join(root, ...marker.fromRelId.split('/'));
           const destKind = this.recoveryEntryKind(destDir);
           const sourceKind = this.recoveryEntryKind(sourceDir);
           if (destKind === 'directory') {
-            this.receiptStore.removeSync(marker.fromRelId);
-            try {
-              this.options.onPhysicalRelocated?.(marker.fromRelId, marker.toRelId);
-            } catch (error) {
-              this.options.log?.warn('ghost relocate recovery side effect failed', {
-                fromRelId: marker.fromRelId,
-                toRelId: marker.toRelId,
-                error: error instanceof Error ? error.message : String(error),
-              });
+            const sourceApproval = this.receiptStore.readForRecovery(marker.fromRelId);
+            if (sourceApproval.state === 'unreadable' || sourceApproval.state === 'invalid') {
+              throw new Error('relocate source receipt unavailable during recovery');
+            }
+            if (sourceKind === 'directory' && sourceApproval.state === 'approved' &&
+                !hasDeliveryNamespace(sourceApproval.receipt)) {
+              throw new Error('relocate journal conflicts with an installed root plugin');
+            }
+            if (sourceApproval.state === 'approved') this.receiptStore.removeSync(marker.fromRelId);
+            const relocated = this.options.onPhysicalRelocated?.(marker.fromRelId, marker.toRelId);
+            if (relocated && typeof (relocated as Promise<void>).then === 'function') {
+              void (relocated as Promise<void>)
+                .then(() => {
+                  if (this.currentOwnerContextKey() !== recoveryOwner) return;
+                  this.receiptStore.clearPendingMutationSync(id);
+                  this.untrustedApprovals.delete(sourceIsolation);
+                  this.untrustedApprovals.delete(destIsolation);
+                  this.options.onPhysicalRelocateCommitted?.(marker.toRelId);
+                })
+                .catch((error) => {
+                  this.untrustedApprovals.add(sourceIsolation);
+                  this.untrustedApprovals.add(destIsolation);
+                  this.options.log?.warn('ghost relocate recovery side effect failed', {
+                    fromRelId: marker.fromRelId,
+                    toRelId: marker.toRelId,
+                    error: error instanceof Error ? error.message : String(error),
+                  });
+                });
+              continue;
             }
           } else if (sourceKind === 'directory') {
             this.receiptStore.removeSync(marker.toRelId);
@@ -1144,6 +1175,12 @@ export class GhostManager {
         }
         this.receiptStore.clearPendingMutationSync(id);
         this.untrustedApprovals.delete(this.isolationKey(id));
+        if (marker.kind === 'relocate') {
+          this.untrustedApprovals.delete(this.isolationKey(marker.toRelId));
+          if (this.recoveryEntryKind(path.join(root, ...marker.toRelId.split('/'))) === 'directory') {
+            this.options.onPhysicalRelocateCommitted?.(marker.toRelId);
+          }
+        }
       } catch (err) {
         // 动盘失败:留着标记,下次启动幂等重试。
         blockedMutationIds.add(id);
@@ -1309,18 +1346,33 @@ export class GhostManager {
     if (this.hasPendingMutationJournal(ghostId) || this.hasPendingMutationJournal(destRel)) {
       return { code: 'io', reason: '意识正在更新，请稍后重试' };
     }
+    try {
+      await this.options.onBeforePhysicalRelocate?.(ghostId);
+    } catch (error) {
+      this.options.onPhysicalRelocateAborted?.(ghostId);
+      return {
+        code: 'io',
+        reason: error instanceof Error ? error.message : String(error),
+      };
+    }
     const destDir = this.contentPath(destRel);
     const approval = this.readApproval(ghostId);
-    await this.receiptStore.writePendingMutation(ghostId, {
-      kind: 'relocate',
-      fromRelId: ghostId,
-      toRelId: destRel,
-    });
+    try {
+      await this.receiptStore.writePendingMutation(ghostId, {
+        kind: 'relocate',
+        fromRelId: ghostId,
+        toRelId: destRel,
+      });
+    } catch (error) {
+      this.options.onPhysicalRelocateAborted?.(ghostId);
+      return { code: 'io', reason: error instanceof Error ? error.message : String(error) };
+    }
+    this.untrustedApprovals.add(this.isolationKey(destRel));
     try {
       if (approval.state === 'approved') {
         await this.receiptStore.write(approval.receipt, {
           relId: destRel,
-          requireSkillSnapshot: false,
+          skillSourceDir: this.contentPath(ghostId),
         });
       }
       await fs.promises.mkdir(path.dirname(destDir), { recursive: true });
@@ -1328,6 +1380,10 @@ export class GhostManager {
     } catch (error) {
       await this.receiptStore.remove(destRel).catch(() => undefined);
       await this.receiptStore.clearPendingMutation(ghostId).catch(() => undefined);
+      if (!this.hasPendingMutationJournal(ghostId)) {
+        this.untrustedApprovals.delete(this.isolationKey(destRel));
+        if (this.isRealDirChildRel(ghostId)) this.options.onPhysicalRelocateAborted?.(ghostId);
+      }
       return {
         code: 'io',
         reason: error instanceof Error ? error.message : String(error),
@@ -1336,7 +1392,6 @@ export class GhostManager {
     if (approval.state === 'approved') {
       await this.receiptStore.remove(ghostId);
     }
-    await this.receiptStore.clearPendingMutation(ghostId);
     return null;
   }
 
@@ -1347,11 +1402,14 @@ export class GhostManager {
       await fs.promises.mkdir(path.dirname(sourceDir), { recursive: true });
       await fs.promises.rename(destDir, sourceDir);
     }
-    const destApproval = this.readApproval(destRel);
-    if (destApproval.state === 'approved' && !this.isRealDirChildRel(destRel)) {
+    // Bypass in-process quarantine: dest is untrusted while the relocate journal
+    // is live, but its receipt is the occupant we must move back.
+    const destApproval = this.receiptStore.read(destRel);
+    if (destApproval.state === 'approved') {
       await this.receiptStore.write(destApproval.receipt, {
         relId: ghostId,
         requireSkillSnapshot: false,
+        skillSourceDir: this.contentPath(ghostId),
       });
       await this.receiptStore.remove(destRel);
     }
@@ -1575,12 +1633,14 @@ export class GhostManager {
     ) {
       return false;
     }
-    const current = this.readApproval(ghost.manifest.id);
+    const relId = path.relative(this.contentRootDir(), ghost.dir).split(path.sep).join('/');
+    if (!isValidPluginInstallRelId(relId)) return false;
+    const current = this.readApproval(relId);
     if (current.state !== 'approved' || current.receipt.revision !== ghost.approval.revision) {
       return false;
     }
     const expectedRoot = this.receiptStore.skillSnapshotRoot(
-      current.receipt.id,
+      relId,
       current.receipt.revision,
     );
     if (path.resolve(ghost.approvedSkillRoot) !== path.resolve(expectedRoot)) {
@@ -3102,6 +3162,9 @@ export class GhostManager {
     const root = this.contentRootDir();
     const identity = createPluginLogicalIdentity(opts?.namespace ?? null, manifest.id);
     const relId = pluginInstallRelId(identity);
+    if (this.hasPendingMutationJournal(relId)) {
+      return { rejection: { code: 'io', reason: '意识正在恢复，请稍后重试' } };
+    }
     if (findInstalledGhostByIdentity(this.list(), identity)) {
       return { rejection: { code: 'already-installed', reason: `意识 ${manifest.id} 已装入` } };
     }
@@ -3153,6 +3216,7 @@ export class GhostManager {
     let receipt: GhostInstallReceipt | undefined;
     let vacatedFrom: string | null = null;
     let vacatedTo: string | null = null;
+    let userDataMoved = false;
     try {
       // 初始沉睡:标记在 staging 阶段就位,rename 后首个广播即沉睡态,
       // 不存在"先启用一帧再熄灯"的跳变(规则 7)。
@@ -3173,6 +3237,26 @@ export class GhostManager {
           }
           vacatedFrom = manifest.id;
           vacatedTo = pluginInstallRelId(occupant);
+          userDataMoved = true;
+          try {
+            await this.options.onPhysicalRelocated?.(vacatedFrom, vacatedTo);
+          } catch (error) {
+            await fs.promises.rm(stagingDir, { recursive: true, force: true }).catch(() => {});
+            return {
+              rejection: {
+                code: 'io',
+                reason: error instanceof Error ? error.message : String(error),
+              },
+            };
+          }
+          try {
+            await this.receiptStore.clearPendingMutation(vacatedFrom);
+            this.untrustedApprovals.delete(this.isolationKey(vacatedTo));
+            this.options.onPhysicalRelocateCommitted?.(vacatedTo);
+          } catch {
+            await fs.promises.rm(stagingDir, { recursive: true, force: true }).catch(() => {});
+            return { rejection: { code: 'io', reason: '数据搬迁已完成，正在等待事务恢复' } };
+          }
         }
       }
       // 事务标记必须在 rename 动盘**之前**落:否则 rename→写 receipt 之间崩溃会留下
@@ -3247,19 +3331,6 @@ export class GhostManager {
           // must not keep an otherwise valid builtin disabled in-process.
           this.untrustedApprovals.delete(this.isolationKey(relId));
         }
-        if (vacatedFrom && vacatedTo) {
-          try {
-            this.options.onPhysicalRelocated?.(vacatedFrom, vacatedTo);
-          } catch (error) {
-            this.options.log?.warn('ghost physical relocate side effect failed', {
-              ghostId: vacatedFrom,
-              destRel: vacatedTo,
-              error: error instanceof Error ? error.message : String(error),
-            });
-          }
-          vacatedFrom = null;
-          vacatedTo = null;
-        }
       } catch (error) {
         try {
           await fs.promises.rm(finalDir, { recursive: true, force: true });
@@ -3283,7 +3354,7 @@ export class GhostManager {
         throw error;
       }
     } catch (err) {
-      if (vacatedFrom && vacatedTo) {
+      if (vacatedFrom && vacatedTo && !userDataMoved) {
         await this.restoreVacatedOccupant(vacatedFrom, vacatedTo).catch((restoreError) => {
           this.options.log?.warn('ghost relocate rollback failed', {
             ghostId: vacatedFrom,

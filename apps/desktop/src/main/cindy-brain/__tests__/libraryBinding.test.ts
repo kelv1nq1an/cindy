@@ -104,6 +104,34 @@ describe('LibraryBindingStore', () => {
     }
   });
 
+  it('refuses to relocate a binding onto an existing destination', async () => {
+    const store = new LibraryBindingStore(deps);
+    await store.setBinding('hello', candidate);
+    await store.setBinding('_ns__acme__hello', candidate);
+    await expect(store.relocateBinding('hello', '_ns__acme__hello')).rejects.toThrow(
+      'library binding destination already exists',
+    );
+    expect(await store.getBinding('hello')).not.toBeNull();
+  });
+
+
+  it('refuses to relocate onto an existing custom library folder without deleting source', async () => {
+    const store = new LibraryBindingStore(deps);
+    await store.setBinding('hello', candidate);
+    const fromRoot = path.join(await fs.promises.realpath(candidate), 'hello');
+    const toRoot = path.join(await fs.promises.realpath(candidate), '_ns__acme__hello');
+    await fs.promises.mkdir(fromRoot, { recursive: true });
+    await fs.promises.writeFile(path.join(fromRoot, 'keep.txt'), 'org');
+    await fs.promises.mkdir(toRoot, { recursive: true });
+    await fs.promises.writeFile(path.join(toRoot, 'old.txt'), 'orphan');
+    await expect(store.relocateBinding('hello', '_ns__acme__hello')).rejects.toThrow(
+      'library custom root destination already exists',
+    );
+    expect(await store.getBinding('hello')).not.toBeNull();
+    await expect(fs.promises.readFile(path.join(fromRoot, 'keep.txt'), 'utf8')).resolves.toBe('org');
+    await expect(fs.promises.readFile(path.join(toRoot, 'old.txt'), 'utf8')).resolves.toBe('orphan');
+  });
+
   it('重新绑定 generation 递增;撤销后回落默认', async () => {
     const store = new LibraryBindingStore(deps);
     await store.setBinding(GHOST_ID, candidate);
