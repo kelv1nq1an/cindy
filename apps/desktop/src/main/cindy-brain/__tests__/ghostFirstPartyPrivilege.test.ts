@@ -231,6 +231,20 @@ describe('resolveGhostFirstPartyPrivilege', () => {
       hostPrimitiveEligible: false,
       basis: 'market-organization-current',
     });
+    expect(
+      resolveGhostFirstPartyPrivilege(
+        facts({
+          ghostId: 'xd-feishu',
+          namespace: 'xd',
+          marketRecord: market({ scope: 'organization', organizationId: 'org-acme' }),
+          currentOrganization: CURRENT_ORG,
+        }),
+      ),
+    ).toEqual({
+      brokerEligible: true,
+      hostPrimitiveEligible: true,
+      basis: 'market-organization-current',
+    });
   });
 
   it('denies same-manifest organization packages when Release and approved package bytes differ', () => {
@@ -286,7 +300,7 @@ describe('resolveGhostFirstPartyPrivilege', () => {
       ),
     ).toEqual({
       brokerEligible: true,
-      hostPrimitiveEligible: false,
+      hostPrimitiveEligible: true,
       basis: 'market-organization-current',
     });
   });

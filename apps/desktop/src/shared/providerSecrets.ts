@@ -17,6 +17,8 @@
  *     (safe-storage IPC 的合法键名校验,见 bootstrap-electron isValidKey)。
  */
 
+import { parsePluginInstallRelId, parsePluginStoragePart } from './pluginIdentity.js';
+
 /** 供应商密钥的稳定标识。新增供应商时在此扩展。 */
 export type ProviderSecretId =
   | 'xd'
@@ -230,10 +232,22 @@ const GHOST_SECRET_STORAGE_ALIASES: Record<string, Record<string, string>> = {
  * ghostId 规则 /^[a-z0-9][a-z0-9-]{0,31}$/、secretKey 规则 /^[a-z][a-z0-9_]{0,31}$/
  * (validateGhostManifest 已把关),此处按惯例在键名构造点再断言一次。
  */
+function ghostSecretAliasOwner(ghostId: string): string {
+  const identity = parsePluginStoragePart(ghostId) ?? parsePluginInstallRelId(ghostId);
+  const logicalId = identity?.ghostId ?? ghostId;
+  const namespace = identity?.namespace ?? null;
+  // Trusted XD Mivo keeps the historical machine-level key. Other orgs' xd-mivo
+  // instances must not share that alias.
+  if (logicalId === 'xd-mivo' && (namespace === null || namespace === 'xd')) {
+    return 'xd-mivo';
+  }
+  return ghostId;
+}
+
 export function ghostSecretStorageKey(ghostId: string, secretKey: string): string {
   assertSafeKeyPart(ghostId, 'ghostId');
   assertSafeKeyPart(secretKey, 'secretKey');
-  const alias = GHOST_SECRET_STORAGE_ALIASES[ghostId]?.[secretKey];
+  const alias = GHOST_SECRET_STORAGE_ALIASES[ghostSecretAliasOwner(ghostId)]?.[secretKey];
   if (alias) return alias;
   return `${GHOST_SECRET_PREFIX}${ghostId}_${secretKey}`;
 }

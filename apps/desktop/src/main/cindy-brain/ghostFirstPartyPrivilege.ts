@@ -181,7 +181,7 @@ export function resolveGhostFirstPartyPrivilege(facts: GhostFirstPartyFacts): Gh
       if (!marketInstallationMatchesApprovedPackage(record, facts.currentOrganization)) {
         return deny('denied-unknown-origin');
       }
-      return allow('market-organization-current', false);
+      return allow('market-organization-current', isOfficialGhostId(facts.ghostId));
     }
     return deny('denied-unknown-origin');
   }

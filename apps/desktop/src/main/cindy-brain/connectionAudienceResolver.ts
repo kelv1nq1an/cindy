@@ -18,7 +18,6 @@ import {
   type InstalledMarketManifestIdentity,
 } from '../plugin-market/installedManifestIdentity.js';
 import { PLUGIN_MEMBER_PUBLISHER_GHOST_ID } from '../plugin-publisher/types.js';
-import { PLUGIN_PREFIX_PATTERN } from '@cindy/plugin-protocol';
 
 export interface ConnectionAudienceIdentity {
   membershipId: string;
@@ -95,6 +94,8 @@ export interface LoadConnectionAudienceResolverOptions {
   ): PluginMarketInstallationRecord | MarketInstallationLookup | null;
   readApprovedPackageSha256?(ghostId: string): string | null;
   readInstallOrigin?(ghostId: string): 'manual' | 'agent-forge';
+  /** Trusted receipt namespace. undefined means no delivery field. */
+  readInstallNamespace?(ghostId: string): string | null | undefined;
   lookupOrganizationPrefix?(
     orgId: string,
   ): { kind: 'known'; pluginPrefix: string | null } | { kind: 'absent' } | { kind: 'unavailable' };
@@ -158,13 +159,13 @@ export function loadConnectionAudienceResolver(
       };
 
       // 显式 ghost_forge_install 的企业作者自测分支，同时兼容升级前已有的
-      // agent-forge receipt。个人身份、未知前缀与缺失批准包哈希均 fail closed。
+      // agent-forge receipt。资格绑定当前组织身份，不再要求旧认领前缀。
       const forgeOrigin = options.readInstallOrigin?.(ghostId);
       if (forgeOrigin === 'agent-forge') {
-        const prefixLookup = options.lookupOrganizationPrefix?.(identity.orgId);
-        const prefix =
-          prefixLookup && prefixLookup.kind === 'known' ? prefixLookup.pluginPrefix : null;
-        if (prefix && PLUGIN_PREFIX_PATTERN.test(prefix) && pluginSlug.startsWith(`${prefix}-`)) {
+        const parsedNamespace = parsePluginInstanceId(ghostId)?.namespace ?? null;
+        const recordedNamespace = options.readInstallNamespace?.(ghostId);
+        const namespace = recordedNamespace !== undefined ? recordedNamespace : parsedNamespace;
+        if (identity.orgSlug && namespace === identity.orgSlug) {
           const approvedSha = options.readApprovedPackageSha256?.(ghostId) ?? null;
           if (!approvedSha || !/^[a-f0-9]{64}$/.test(approvedSha)) {
             return reject('forge-package-sha-missing');

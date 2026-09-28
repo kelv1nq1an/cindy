@@ -208,7 +208,7 @@ describe('installed Plugin Connection audience resolver', () => {
       }),
       readInstallOrigin: () => 'agent-forge',
       readApprovedPackageSha256: () => 'a'.repeat(64),
-      lookupOrganizationPrefix: () => ({ kind: 'known', pluginPrefix: 'acme' }),
+      readInstallNamespace: () => 'org-example',
     });
     expect(resolver.resolve('acme-tool', identity)).toEqual({
       membershipId: 'membership-1',
@@ -218,20 +218,44 @@ describe('installed Plugin Connection audience resolver', () => {
     });
   });
 
-  it('does not extend Forge OIDC to a manual install or another prefix', () => {
-    const forgeManifest: GhostManifest = { ...manifest, id: 'acme-tool' };
+  it('does not extend Forge OIDC to a manual install or another organization', () => {
+    const forgeManifest: GhostManifest = { ...manifest, id: 'helper' };
     for (const options of [
-      { readInstallOrigin: () => 'manual' as const, pluginPrefix: 'acme' },
-      { readInstallOrigin: () => 'agent-forge' as const, pluginPrefix: 'other' },
+      { readInstallOrigin: () => 'manual' as const, namespace: 'org-example' as string | null },
+      { readInstallOrigin: () => 'agent-forge' as const, namespace: 'other' as string | null },
     ]) {
       const resolver = loadConnectionAudienceResolver({
         ...resolverOptions(forgeManifest, null),
         readInstallOrigin: options.readInstallOrigin,
         readApprovedPackageSha256: () => 'a'.repeat(64),
-        lookupOrganizationPrefix: () => ({ kind: 'known', pluginPrefix: options.pluginPrefix }),
+        readInstallNamespace: () => options.namespace,
       });
-      expect(resolver.resolve('acme-tool', identity)).toBeNull();
+      expect(resolver.resolve('helper', identity)).toBeNull();
     }
+  });
+
+  it('resolves a prefix-free Forge helper bound to the current organization', () => {
+    const forgeManifest: GhostManifest = { ...manifest, id: 'helper' };
+    const resolver = loadConnectionAudienceResolver({
+      ...resolverOptions(forgeManifest, null),
+      readInstallOrigin: () => 'agent-forge',
+      readApprovedPackageSha256: () => 'a'.repeat(64),
+      readInstalledManifestIdentity: (id) =>
+        id === '_ns__org-example__helper' || id === 'helper'
+          ? {
+              manifest: forgeManifest,
+              rawManifestSha256: ghostManifestDigest(forgeManifest),
+              legacyManifestDigest: ghostManifestDigest(forgeManifest),
+              legacyManifestDigests: [ghostManifestDigest(forgeManifest)],
+            }
+          : null,
+    });
+    expect(resolver.resolve('_ns__org-example__helper', identity)).toEqual({
+      membershipId: 'membership-1',
+      audience: 'org-example:helper',
+      pluginSlug: 'helper',
+      allowedHosts: ['service-a.x.test'],
+    });
   });
 
   it('resolves a named local mivo-canvas install without a market record', () => {

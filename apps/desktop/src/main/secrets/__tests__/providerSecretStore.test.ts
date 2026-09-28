@@ -162,9 +162,12 @@ describe('providerSecrets registry', () => {
       'ghost_hint__ns__acme__helper_token',
     );
     expect(ghostSecretStorageKey('_ns__xd__xd-mivo', 'mivo_api_key')).toBe(
-      'ghost_secret__ns__xd__xd-mivo_mivo_api_key',
+      ghostSecretStorageKey('xd-mivo', 'mivo_api_key'),
     );
-    expect(ghostSecretStorageKey('_ns__xd__xd-mivo', 'mivo_api_key')).not.toBe(
+    expect(ghostSecretStorageKey('_ns__acme__xd-mivo', 'mivo_api_key')).toBe(
+      'ghost_secret__ns__acme__xd-mivo_mivo_api_key',
+    );
+    expect(ghostSecretStorageKey('_ns__acme__xd-mivo', 'mivo_api_key')).not.toBe(
       ghostSecretStorageKey('xd-mivo', 'mivo_api_key'),
     );
   });

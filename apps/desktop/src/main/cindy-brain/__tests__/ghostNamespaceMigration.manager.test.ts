@@ -225,6 +225,23 @@ describe('GhostManager namespace migration census', () => {
     expect(manager.list()).toEqual([]);
   });
 
+  it('lets a root plugin occupy the original directory after an in-place namespaced stamp', async () => {
+    await plantLegacyInstall('hello');
+    manager.list();
+    await manager.commitPendingNamespace('hello', 'acme', 'market-organization');
+    const rootCindy = await makeCindy('hello');
+    await expect(manager.install(rootCindy)).resolves.toMatchObject({
+      ghost: { manifest: { id: 'hello' }, dir: path.join(rootDir, 'hello') },
+    });
+    expect(fs.existsSync(path.join(rootDir, '_ns', 'acme', 'hello', 'ghost.json'))).toBe(true);
+    expect(manager.list().map((ghost) => [ghost.namespace ?? null, ghost.manifest.id, ghost.dir])).toEqual(
+      expect.arrayContaining([
+        ['acme', 'hello', path.join(rootDir, '_ns', 'acme', 'hello')],
+        [null, 'hello', path.join(rootDir, 'hello')],
+      ]),
+    );
+  });
+
   it('treats a later install of the same organization identity as already installed', async () => {
     await plantLegacyInstall('hello');
     manager.list();

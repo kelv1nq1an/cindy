@@ -841,6 +841,34 @@ export function removeGhostSecrets(ghostId: string): void {
   }
 }
 
+/** Best-effort rename of ghost_secret_/ghost_hint_ keys after a physical relocate. */
+export function migrateGhostSecrets(fromGhostId: string, toGhostId: string): void {
+  if (fromGhostId === toGhostId) return;
+  const pairs: Array<[string, string]> = [
+    [`${GHOST_SECRET_PREFIX}${fromGhostId}_`, `${GHOST_SECRET_PREFIX}${toGhostId}_`],
+    [`${GHOST_SECRET_HINT_PREFIX}${fromGhostId}_`, `${GHOST_SECRET_HINT_PREFIX}${toGhostId}_`],
+  ];
+  try {
+    for (const key of electronSecretIo.list()) {
+      for (const [fromPrefix, toPrefix] of pairs) {
+        if (!key.startsWith(fromPrefix)) continue;
+        const dest = `${toPrefix}${key.slice(fromPrefix.length)}`;
+        const value = electronSecretIo.read(key);
+        if (value !== null && electronSecretIo.read(dest) === null) {
+          electronSecretIo.write(dest, value);
+        }
+        electronSecretIo.remove(key);
+        break;
+      }
+    }
+  } catch (err) {
+    log.warn(
+      { fromGhostId, toGhostId, err: err instanceof Error ? err.message : String(err) },
+      'migrate ghost secrets failed',
+    );
+  }
+}
+
 export const genericOAuthSecretIo = {
   read(providerId: string): string | null {
     try {

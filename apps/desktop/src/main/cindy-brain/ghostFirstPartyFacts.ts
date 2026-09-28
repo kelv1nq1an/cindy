@@ -72,6 +72,11 @@ export interface LoadGhostFirstPartyFactsLoaderOptions {
   lookupOrganizationPrefix(orgId: string): OrganizationPrefixLookup;
   /** 显式 ghost_forge_install 返回 agent-forge；其它入口返回 manual。 */
   readInstallOrigin(ghostId: string): 'manual' | 'agent-forge';
+  /**
+   * Trusted receipt namespace. `undefined` means no delivery field; explicit
+   * `null` is root. Do not invent the current org slug here.
+   */
+  readInstallNamespace?(ghostId: string): string | null | undefined;
 }
 
 function actionFor(purpose: GhostFirstPartyFactsPurpose): GhostFirstPartyFactsUnavailableAction {
@@ -131,10 +136,12 @@ export function loadGhostFirstPartyFactsLoader(
       // Receipts / origin live under install rel id (`helper` or `_ns/acme/helper`).
       // Runtime oauth may pass a storage part (`_ns__acme__helper`).
       const installRelId = parsed ? pluginInstallRelId(parsed) : ghostId;
-      const namespace =
+      const recordedNamespace =
         overrides?.namespace !== undefined
           ? overrides.namespace
-          : (parsed?.namespace ?? null);
+          : options.readInstallNamespace?.(installRelId);
+      const namespace =
+        recordedNamespace !== undefined ? recordedNamespace : (parsed?.namespace ?? null);
       const unavailable = (
         reason: GhostFirstPartyFactsUnavailableReason,
       ): GhostFirstPartyFactsLoad => ({

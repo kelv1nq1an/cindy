@@ -84,6 +84,26 @@ describe('LibraryBindingStore', () => {
     if (!bad.ok) expect(bad.errorCode).toBe('PATH_INVALID');
   });
 
+  it('relocates a custom binding key and folder after an in-place instance moves', async () => {
+    const store = new LibraryBindingStore(deps);
+    const fromId = 'hello';
+    const toId = '_ns__acme__hello';
+    const set = await store.setBinding(fromId, candidate);
+    expect(set.ok).toBe(true);
+    const fromRoot = path.join(await fs.promises.realpath(candidate), fromId);
+    await fs.promises.mkdir(fromRoot, { recursive: true });
+    await fs.promises.writeFile(path.join(fromRoot, 'keep.txt'), 'org');
+    await store.relocateBinding(fromId, toId);
+    expect(await store.getBinding(fromId)).toBeNull();
+    expect(await store.getBinding(toId)).not.toBeNull();
+    const resolved = await store.resolveLibraryRoot(toId);
+    expect(resolved.kind).toBe('custom');
+    if (resolved.kind === 'custom' && resolved.root !== null) {
+      expect(resolved.root).toBe(path.join(await fs.promises.realpath(candidate), toId));
+      await expect(fs.promises.readFile(path.join(resolved.root, 'keep.txt'), 'utf8')).resolves.toBe('org');
+    }
+  });
+
   it('重新绑定 generation 递增;撤销后回落默认', async () => {
     const store = new LibraryBindingStore(deps);
     await store.setBinding(GHOST_ID, candidate);

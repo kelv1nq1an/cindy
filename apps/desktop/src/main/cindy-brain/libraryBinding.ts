@@ -294,6 +294,33 @@ export class LibraryBindingStore {
     return this.readData().then((d) => d.bindings[ghostId] ?? null);
   }
 
+  /** Move a custom binding key after a physical instance relocate. */
+  async relocateBinding(fromGhostId: string, toGhostId: string): Promise<void> {
+    if (fromGhostId === toGhostId) return;
+    if (!isValidPluginStoragePart(fromGhostId) || !isValidPluginStoragePart(toGhostId)) return;
+    await this.runSerialized(async () => {
+      const data = await this.readData();
+      const record = data.bindings[fromGhostId];
+      if (!record || data.bindings[toGhostId]) return;
+      const fromRoot = path.join(record.root, fromGhostId);
+      const toRoot = path.join(record.root, toGhostId);
+      try {
+        if (fs.existsSync(fromRoot) && !fs.existsSync(toRoot)) {
+          await fs.promises.rename(fromRoot, toRoot);
+        }
+      } catch (error) {
+        this.deps.log?.warn('library custom root relocate failed', {
+          fromGhostId,
+          toGhostId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+      data.bindings[toGhostId] = record;
+      delete data.bindings[fromGhostId];
+      await this.writeData(data);
+    });
+  }
+
   /** First successful custom open: persist ready without bumping generation. */
   async markLibraryReady(ghostId: string): Promise<void> {
     await this.runSerialized(async () => {

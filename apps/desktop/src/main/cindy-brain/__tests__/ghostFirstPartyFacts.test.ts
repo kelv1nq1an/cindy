@@ -375,6 +375,22 @@ describe('loadGhostFirstPartyFactsLoader', () => {
     });
   });
 
+  it('reads trusted receipt namespace for an in-place physical id', () => {
+    const factsLoader = loader({
+      lookupOrganizationPrefix: () => ({ kind: 'known', pluginPrefix: null }),
+      readInstallOrigin: () => 'agent-forge',
+      readInstallNamespace: (id) => (id === 'acme-tool' ? 'slug-a' : undefined),
+    });
+    const loaded = factsLoader.load('acme-tool', 'runtime', ORG_A);
+    expect(loaded).toMatchObject({
+      kind: 'ready',
+      facts: { ghostId: 'acme-tool', namespace: 'slug-a', installOrigin: 'agent-forge' },
+    });
+    if (loaded.kind === 'ready') {
+      expect(authorizeGhostTokenBroker('acme-tool', loaded)).toBe(true);
+    }
+  });
+
   it('lets install-time namespace override win over a free-name ghost id', () => {
     const factsLoader = loader({
       lookupOrganizationPrefix: () => ({ kind: 'known', pluginPrefix: null }),

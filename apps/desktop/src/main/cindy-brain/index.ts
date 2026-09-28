@@ -406,6 +406,7 @@ import {
   readCustomProviderKey,
   readGhostSecretTail,
   removeGhostSecret,
+  migrateGhostSecrets,
   removeGhostSecrets,
   storeGhostSecret,
 } from '../secrets/providerSecretStore.js';
@@ -1344,6 +1345,79 @@ function migrateGhostKvOnRename(fromId: string, toId: string): void {
   }
 }
 
+function relocateOwnedPath(fromPath: string, toPath: string): void {
+  if (!fs.existsSync(fromPath) || fs.existsSync(toPath)) {
+    if (fs.existsSync(fromPath) && fs.existsSync(toPath) && fromPath !== toPath) {
+      fs.rmSync(fromPath, { recursive: true, force: true });
+    }
+    return;
+  }
+  fs.mkdirSync(path.dirname(toPath), { recursive: true });
+  fs.renameSync(fromPath, toPath);
+}
+
+function relocateGhostUserData(fromPart: string, toPart: string): void {
+  if (fromPart === toPart) return;
+  try {
+    const kvDir = ownerScopedUserDataPath('ghost-kv');
+    const fromKv = path.join(kvDir, `${fromPart}.json`);
+    const toKv = path.join(kvDir, `${toPart}.json`);
+    relocateOwnedPath(fromKv, toKv);
+  } catch (error) {
+    log.warn('ghost kv relocate failed', {
+      fromPart,
+      toPart,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+  migrateGhostSecrets(fromPart, toPart);
+  try {
+    relocateOwnedPath(
+      ownerScopedUserDataPath('ghost-fs', fromPart),
+      ownerScopedUserDataPath('ghost-fs', toPart),
+    );
+  } catch (error) {
+    log.warn('ghost-fs relocate failed', {
+      fromPart,
+      toPart,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+  try {
+    relocateOwnedPath(
+      ownerScopedUserDataPath('libraries', fromPart),
+      ownerScopedUserDataPath('libraries', toPart),
+    );
+  } catch (error) {
+    log.warn('ghost library relocate failed', {
+      fromPart,
+      toPart,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+  try {
+    relocateOwnedPath(
+      ownerScopedUserDataPath('library-staging', fromPart),
+      ownerScopedUserDataPath('library-staging', toPart),
+    );
+  } catch (error) {
+    log.warn('ghost library staging relocate failed', {
+      fromPart,
+      toPart,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+  void getGhostLibraryBindingStore()
+    .relocateBinding(fromPart, toPart)
+    .catch((error: unknown) => {
+      log.warn('ghost library binding relocate failed', {
+        fromPart,
+        toPart,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
+}
+
 /** 单轮对账:一次性 legacy 迁移 → 播种 → (有变化时)广播 + 首装停靠 + 常驻点火。 */
 async function reconcileBuiltinGhosts(
   reason: string,
@@ -1622,6 +1696,12 @@ export function getGhostManager(): GhostManager {
             error: error instanceof Error ? error.message : String(error),
           });
         }
+      },
+      onPhysicalRelocated: (fromRelId, toRelId) => {
+        const fromIdentity = parsePluginInstallRelId(fromRelId);
+        const toIdentity = parsePluginInstallRelId(toRelId);
+        if (!fromIdentity || !toIdentity) return;
+        relocateGhostUserData(pluginStoragePart(fromIdentity), pluginStoragePart(toIdentity));
       },
       isTrustedBundledSource,
       recordBuiltinTombstone: (id) => recordBuiltinTombstone(brainRootDir(), id, log),
@@ -2873,6 +2953,7 @@ function getConnectionAudienceResolver(): ConnectionAudienceResolver {
       readApprovedPackageSha256: (ghostId) =>
         getGhostManager().approvedInstallEvidence(ghostId)?.packageSha256 ?? null,
       readInstallOrigin: (ghostId) => getGhostManager().readEffectiveInstallOrigin(ghostId),
+      readInstallNamespace: (ghostId) => getGhostManager().readDeliveryNamespace(ghostId),
       lookupOrganizationPrefix: (orgId) =>
         createOrganizationPrefixStore(
           ownerScopedUserDataPath('plugin-market', 'organization.v1.json'),
@@ -2907,6 +2988,7 @@ function getGhostFirstPartyFactsLoader(): GhostFirstPartyFactsLoader {
           ownerScopedUserDataPath('plugin-market', 'organization.v1.json'),
         ).lookup(orgId),
       readInstallOrigin: (ghostId) => getGhostManager().readEffectiveInstallOrigin(ghostId),
+      readInstallNamespace: (ghostId) => getGhostManager().readDeliveryNamespace(ghostId),
     });
   }
   return ghostFirstPartyFactsLoaderSingleton;

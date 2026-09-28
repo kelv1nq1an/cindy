@@ -251,6 +251,8 @@ export interface GhostManagerOptions {
   isNamespaceMigrationBusy?: (ghostId: string) => boolean;
   /** Best-effort side effect after receipt + census ledger commit. */
   onNamespaceCommitted?: (ghostId: string, namespace: string | null) => void;
+  /** Fired when an in-place namespaced install is moved to its canonical _ns path. */
+  onPhysicalRelocated?: (fromRelId: string, toRelId: string) => void;
   /** sourceDir 是否就是该 id 的随包只读种子目录，而非任意本机可变目录。 */
   isTrustedBundledSource?: (id: string, sourceDir: string) => boolean;
   /** Persist the user's builtin-uninstall intent before approval/content removal. */
@@ -1024,6 +1026,27 @@ export class GhostManager {
           if (this.recoveryEntryKind(finalDir) === 'directory') {
             fs.rmSync(finalDir, { recursive: true, force: true });
           }
+        } else if (marker.kind === 'relocate') {
+          const destDir = path.join(root, ...marker.toRelId.split('/'));
+          const sourceDir = path.join(root, ...marker.fromRelId.split('/'));
+          const destKind = this.recoveryEntryKind(destDir);
+          const sourceKind = this.recoveryEntryKind(sourceDir);
+          if (destKind === 'directory') {
+            this.receiptStore.removeSync(marker.fromRelId);
+            try {
+              this.options.onPhysicalRelocated?.(marker.fromRelId, marker.toRelId);
+            } catch (error) {
+              this.options.log?.warn('ghost relocate recovery side effect failed', {
+                fromRelId: marker.fromRelId,
+                toRelId: marker.toRelId,
+                error: error instanceof Error ? error.message : String(error),
+              });
+            }
+          } else if (sourceKind === 'directory') {
+            this.receiptStore.removeSync(marker.toRelId);
+          } else {
+            throw new Error('relocate recovery lost both source and destination directories');
+          }
         } else {
           const approval = this.receiptStore.readForRecovery(id);
           if (approval.state === 'unreadable') {
@@ -1257,6 +1280,83 @@ export class GhostManager {
     return logicalRel;
   }
 
+  private occupantLogicalIdentity(relId: string): ReturnType<typeof parsePluginInstallRelId> {
+    if (!this.isRealDirChildRel(relId)) return null;
+    const fromPath = parsePluginInstallRelId(relId);
+    if (!fromPath) return null;
+    if (fromPath.namespace !== null) return fromPath;
+    const approval = this.readApproval(relId);
+    if (approval.state === 'approved' && hasDeliveryNamespace(approval.receipt)) {
+      return createPluginLogicalIdentity(approval.receipt.namespace, fromPath.ghostId);
+    }
+    return fromPath;
+  }
+
+  /**
+   * In-place namespaced installs occupy the root ghostId directory. A later root
+   * install of the same ghostId needs that path; move the occupant to its
+   * canonical `_ns/<namespace>/<ghostId>` location without rewriting package bytes.
+   */
+  private async vacateInPlaceNamespacedOccupant(ghostId: string): Promise<InstallRejection | null> {
+    if (!isValidGhostId(ghostId) || !this.isRealDirChildRel(ghostId)) return null;
+    const occupant = this.occupantLogicalIdentity(ghostId);
+    if (!occupant || occupant.namespace === null) return null;
+    const destRel = pluginInstallRelId(occupant);
+    if (destRel === ghostId) return null;
+    if (this.isRealDirChildRel(destRel) || (await pathExists(this.contentPath(destRel)))) {
+      return { code: 'already-installed', reason: `意识 ${ghostId} 已装入` };
+    }
+    if (this.hasPendingMutationJournal(ghostId) || this.hasPendingMutationJournal(destRel)) {
+      return { code: 'io', reason: '意识正在更新，请稍后重试' };
+    }
+    const destDir = this.contentPath(destRel);
+    const approval = this.readApproval(ghostId);
+    await this.receiptStore.writePendingMutation(ghostId, {
+      kind: 'relocate',
+      fromRelId: ghostId,
+      toRelId: destRel,
+    });
+    try {
+      if (approval.state === 'approved') {
+        await this.receiptStore.write(approval.receipt, {
+          relId: destRel,
+          requireSkillSnapshot: false,
+        });
+      }
+      await fs.promises.mkdir(path.dirname(destDir), { recursive: true });
+      await fs.promises.rename(this.contentPath(ghostId), destDir);
+    } catch (error) {
+      await this.receiptStore.remove(destRel).catch(() => undefined);
+      await this.receiptStore.clearPendingMutation(ghostId).catch(() => undefined);
+      return {
+        code: 'io',
+        reason: error instanceof Error ? error.message : String(error),
+      };
+    }
+    if (approval.state === 'approved') {
+      await this.receiptStore.remove(ghostId);
+    }
+    await this.receiptStore.clearPendingMutation(ghostId);
+    return null;
+  }
+
+  private async restoreVacatedOccupant(ghostId: string, destRel: string): Promise<void> {
+    const destDir = this.contentPath(destRel);
+    const sourceDir = this.contentPath(ghostId);
+    if (this.isRealDirChildRel(destRel) && !this.isRealDirChildRel(ghostId)) {
+      await fs.promises.mkdir(path.dirname(sourceDir), { recursive: true });
+      await fs.promises.rename(destDir, sourceDir);
+    }
+    const destApproval = this.readApproval(destRel);
+    if (destApproval.state === 'approved' && !this.isRealDirChildRel(destRel)) {
+      await this.receiptStore.write(destApproval.receipt, {
+        relId: ghostId,
+        requireSkillSnapshot: false,
+      });
+      await this.receiptStore.remove(destRel);
+    }
+  }
+
   /** Receipts live under install rel id (helper or _ns/acme/helper), including in-place org dirs. */
   private approvalRelIdFor(id: string): string | null {
     const identity = parsePluginStoragePart(id) ?? parsePluginInstallRelId(id);
@@ -1339,6 +1439,22 @@ export class GhostManager {
       return effectiveInstallOrigin(approval.receipt);
     } catch {
       return 'manual';
+    }
+  }
+
+  /** Trusted receipt namespace. undefined means the delivery field is absent. */
+  readDeliveryNamespace(id: string): string | null | undefined {
+    this.ensureCurrentOwnerContextSync();
+    const relId = this.approvalRelIdFor(id);
+    if (!relId) return undefined;
+    try {
+      const approval = this.readApproval(relId);
+      if (approval.state !== 'approved' || !hasDeliveryNamespace(approval.receipt)) {
+        return undefined;
+      }
+      return approval.receipt.namespace ?? null;
+    } catch {
+      return undefined;
     }
   }
 
@@ -2986,13 +3102,19 @@ export class GhostManager {
     const root = this.contentRootDir();
     const identity = createPluginLogicalIdentity(opts?.namespace ?? null, manifest.id);
     const relId = pluginInstallRelId(identity);
+    if (findInstalledGhostByIdentity(this.list(), identity)) {
+      return { rejection: { code: 'already-installed', reason: `意识 ${manifest.id} 已装入` } };
+    }
     const physicalRel = this.resolvePhysicalRelId(relId) ?? relId;
     if (physicalRel !== relId && this.isRealDirChildRel(physicalRel)) {
       return { rejection: { code: 'already-installed', reason: `意识 ${manifest.id} 已装入` } };
     }
     const finalDir = this.contentPath(relId);
     if (await pathExists(finalDir)) {
-      return { rejection: { code: 'already-installed', reason: `意识 ${manifest.id} 已装入` } };
+      const occupant = this.occupantLogicalIdentity(relId);
+      if (!occupant || pluginInstallRelId(occupant) === relId) {
+        return { rejection: { code: 'already-installed', reason: `意识 ${manifest.id} 已装入` } };
+      }
     }
     const pendingInstall = this.resolvePendingNamespaceInstall(manifest.id, identity.namespace);
     if (pendingInstall.kind === 'already-installed') {
@@ -3029,6 +3151,8 @@ export class GhostManager {
     // receipt 在内容落到 finalDir 之后才创建:技能字节指纹必须从这次批准的内容
     // 目录现算,不能凭空构造。
     let receipt: GhostInstallReceipt | undefined;
+    let vacatedFrom: string | null = null;
+    let vacatedTo: string | null = null;
     try {
       // 初始沉睡:标记在 staging 阶段就位,rename 后首个广播即沉睡态,
       // 不存在"先启用一帧再熄灯"的跳变(规则 7)。
@@ -3039,6 +3163,18 @@ export class GhostManager {
           : MAX_BASIC_UNCOMPRESSED_BYTES,
         trust,
       });
+      if (identity.namespace === null) {
+        const occupant = this.occupantLogicalIdentity(manifest.id);
+        if (occupant && occupant.namespace !== null) {
+          const vacated = await this.vacateInPlaceNamespacedOccupant(manifest.id);
+          if (vacated) {
+            await fs.promises.rm(stagingDir, { recursive: true, force: true }).catch(() => {});
+            return { rejection: vacated };
+          }
+          vacatedFrom = manifest.id;
+          vacatedTo = pluginInstallRelId(occupant);
+        }
+      }
       // 事务标记必须在 rename 动盘**之前**落:否则 rename→写 receipt 之间崩溃会留下
       // "有 finalDir、无 receipt、无 ledger"的目录,与 legacy 安装无法区分,被迁移当
       // 存量批准掉(而崩溃窗口内同权限进程可改写 finalDir 的 manifest)。带 packageSha256
@@ -3111,6 +3247,19 @@ export class GhostManager {
           // must not keep an otherwise valid builtin disabled in-process.
           this.untrustedApprovals.delete(this.isolationKey(relId));
         }
+        if (vacatedFrom && vacatedTo) {
+          try {
+            this.options.onPhysicalRelocated?.(vacatedFrom, vacatedTo);
+          } catch (error) {
+            this.options.log?.warn('ghost physical relocate side effect failed', {
+              ghostId: vacatedFrom,
+              destRel: vacatedTo,
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
+          vacatedFrom = null;
+          vacatedTo = null;
+        }
       } catch (error) {
         try {
           await fs.promises.rm(finalDir, { recursive: true, force: true });
@@ -3134,6 +3283,15 @@ export class GhostManager {
         throw error;
       }
     } catch (err) {
+      if (vacatedFrom && vacatedTo) {
+        await this.restoreVacatedOccupant(vacatedFrom, vacatedTo).catch((restoreError) => {
+          this.options.log?.warn('ghost relocate rollback failed', {
+            ghostId: vacatedFrom,
+            destRel: vacatedTo,
+            error: restoreError instanceof Error ? restoreError.message : String(restoreError),
+          });
+        });
+      }
       await fs.promises.rm(stagingDir, { recursive: true, force: true }).catch(() => {});
       if (err instanceof InstallExtractError) {
         return { rejection: { code: 'file-invalid', reason: err.message } };

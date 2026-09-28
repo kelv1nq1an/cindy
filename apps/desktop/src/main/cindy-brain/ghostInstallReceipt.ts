@@ -181,7 +181,8 @@ export type GhostPendingMutation =
     }
   // uninstall 不带 packageSha256:它的提交信号不是"receipt 写到某版本",而是"receipt +
   // 内容目录都已移除"。恢复见到它就把两者删干净(顺序无关,幂等)。
-  | { kind: 'uninstall'; builtinTombstone?: boolean };
+  | { kind: 'uninstall'; builtinTombstone?: boolean }
+  | { kind: 'relocate'; fromRelId: string; toRelId: string };
 
 export type GhostPendingMutationReadResult =
   | { state: 'valid'; mutation: GhostPendingMutation }
@@ -765,6 +766,20 @@ export class GhostInstallReceiptStore {
           kind: 'uninstall',
           ...(raw.builtinTombstone === true ? { builtinTombstone: true } : {}),
         },
+      };
+    }
+    if (raw.kind === 'relocate') {
+      if (
+        typeof raw.fromRelId !== 'string' ||
+        typeof raw.toRelId !== 'string' ||
+        !isValidPluginInstallRelId(raw.fromRelId) ||
+        !isValidPluginInstallRelId(raw.toRelId)
+      ) {
+        return { state: 'invalid', reason: 'journal relocate ids are invalid' };
+      }
+      return {
+        state: 'valid',
+        mutation: { kind: 'relocate', fromRelId: raw.fromRelId, toRelId: raw.toRelId },
       };
     }
     if (typeof raw.packageSha256 !== 'string' || !/^[a-f0-9]{64}$/.test(raw.packageSha256)) {
