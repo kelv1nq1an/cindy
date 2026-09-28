@@ -67,7 +67,7 @@ export interface NamespaceCensusCandidate {
 export interface ClassifyNamespaceMigrationInput {
   ghostId: string;
   builtin: boolean;
-  installOrigin: 'manual' | 'agent-forge';
+  installOrigin: 'manual' | 'agent-forge' | undefined;
   marketSyncCompleted: boolean;
   marketRecord: {
     scope: 'public' | 'personal' | 'organization';
@@ -89,6 +89,16 @@ export function readNamespaceMigrationMarketRecord(
     const records = readRecords();
     if (records.length === 0) return null;
     return records.length === 1 ? records[0] : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export function readNamespaceMigrationInstallOrigin(
+  readApprovedOrigin: () => 'manual' | 'agent-forge',
+): ClassifyNamespaceMigrationInput['installOrigin'] {
+  try {
+    return readApprovedOrigin();
   } catch {
     return undefined;
   }
@@ -219,6 +229,10 @@ export function classifyNamespaceMigration(
 
   if (input.builtin) {
     return { kind: 'commit', namespace: null, basis: 'builtin' };
+  }
+
+  if (input.installOrigin === undefined) {
+    return { kind: 'pending', reason: 'awaiting-install-origin' };
   }
 
   if (

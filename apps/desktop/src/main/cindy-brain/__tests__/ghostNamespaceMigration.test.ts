@@ -15,6 +15,7 @@ import {
   parseNamespaceMigrationLedger,
   pendingNamespaceGhostIds,
   planNamespaceCommit,
+  readNamespaceMigrationInstallOrigin,
   readNamespaceMigrationMarketRecord,
   resolveInstallAgainstPending,
   type ClassifyNamespaceMigrationInput,
@@ -218,6 +219,35 @@ describe('classifyNamespaceMigration', () => {
       marketRecord: readNamespaceMigrationMarketRecord(() => [organizationRecord]),
       currentOrganization: { organizationId: 'org-xd', orgSlug: 'xd', pluginPrefix: 'xd' },
     })).toEqual({ kind: 'commit', namespace: 'xd', basis: 'market-organization' });
+  });
+
+  it('does not turn an unreadable approved origin into a manual root install', () => {
+    const unavailable = readNamespaceMigrationInstallOrigin(() => { throw new Error('locked receipt'); });
+    const currentOrganization = { organizationId: 'org-acme', orgSlug: 'acme', pluginPrefix: null };
+    expect(unavailable).toBeUndefined();
+    expect(classify({ ghostId: 'acme-tool', marketSyncCompleted: true, installOrigin: unavailable })).toEqual({
+      kind: 'pending',
+      reason: 'awaiting-install-origin',
+    });
+    expect(classify({ ghostId: 'acme-tool', marketSyncCompleted: true, installOrigin: unavailable, builtin: true }))
+      .toEqual({ kind: 'commit', namespace: null, basis: 'builtin' });
+    expect(classify({
+      ghostId: 'acme-tool',
+      marketSyncCompleted: true,
+      installOrigin: unavailable,
+      marketRecord: { scope: 'public', source: 'market', organizationId: null },
+    })).toEqual({ kind: 'commit', namespace: null, basis: 'market-public' });
+    expect(classify({
+      ghostId: 'acme-tool',
+      marketSyncCompleted: true,
+      installOrigin: readNamespaceMigrationInstallOrigin(() => 'agent-forge'),
+      currentOrganization,
+    })).toEqual({ kind: 'pending', reason: 'awaiting-market-facts' });
+    expect(classify({
+      ghostId: 'local-tool',
+      marketSyncCompleted: true,
+      installOrigin: readNamespaceMigrationInstallOrigin(() => 'manual'),
+    })).toEqual({ kind: 'commit', namespace: null, basis: 'manual-after-sync' });
   });
 });
 

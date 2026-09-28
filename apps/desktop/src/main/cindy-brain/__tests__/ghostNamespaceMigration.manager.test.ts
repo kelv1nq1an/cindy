@@ -4,8 +4,13 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import type { InstalledGhost } from '../../../shared/ghost.js';
+import { createOrganizationPrefixStore } from '../../plugin-market/organizationPrefixStore.js';
 import { GhostManager } from '../GhostManager.js';
-import { classifyNamespaceMigration, readNamespaceMigrationMarketRecord } from '../ghostNamespaceMigration.js';
+import {
+  classifyNamespaceMigration,
+  readNamespaceMigrationInstallOrigin,
+  readNamespaceMigrationMarketRecord,
+} from '../ghostNamespaceMigration.js';
 import {
   GhostInstallReceiptStore,
   createGhostInstallReceipt,
@@ -49,7 +54,11 @@ function manifest(id = 'hello'): Record<string, unknown> {
   };
 }
 
-async function plantLegacyInstall(id: string, withSkill = false): Promise<void> {
+async function plantLegacyInstall(
+  id: string,
+  withSkill = false,
+  installOrigin?: 'agent-forge',
+): Promise<void> {
   const dir = path.join(rootDir, id);
   await fs.promises.mkdir(dir, { recursive: true });
   const declared = {
@@ -89,6 +98,7 @@ async function plantLegacyInstall(id: string, withSkill = false): Promise<void> 
         reviewed: false,
       },
       skillContentSha256: await hashApprovedSkillContent(approvedManifest, dir),
+      ...(installOrigin ? { installOrigin } : {}),
     }),
     { skillSourceDir: dir },
   );
@@ -105,6 +115,47 @@ async function makeCindy(id: string): Promise<string> {
 }
 
 describe('GhostManager namespace migration census', () => {
+  it('waits for approved origin and organization prefix before committing a Forge install', async () => {
+    await plantLegacyInstall('acme-tool', false, 'agent-forge');
+    const prefixStore = createOrganizationPrefixStore(path.join(workDir, 'organization.v1.json'));
+    let receiptUnreadable = true;
+    manager = new GhostManager({
+      getRootDir: () => rootDir,
+      classifyPendingNamespace: (ghostId, marketSyncCompleted = false) => {
+        const prefix = prefixStore.lookup('org-acme');
+        return classifyNamespaceMigration({
+          ghostId,
+          builtin: false,
+          installOrigin: readNamespaceMigrationInstallOrigin(() => {
+            if (receiptUnreadable) throw new Error('receipt temporarily unreadable');
+            return manager.readApprovedInstallOriginStrict(ghostId);
+          }),
+          marketSyncCompleted,
+          marketRecord: null,
+          currentOrganization: {
+            organizationId: 'org-acme',
+            orgSlug: 'acme',
+            pluginPrefix: prefix.kind === 'known' ? prefix.pluginPrefix : null,
+          },
+        });
+      },
+    });
+
+    await manager.reconcilePendingRootNamespaces(true);
+    expect(manager.list()[0]).toMatchObject({ namespaceMigration: 'pending' });
+    expect(manager.list()[0]?.namespace).toBeUndefined();
+
+    receiptUnreadable = false;
+    await manager.reconcilePendingRootNamespaces(true);
+    expect(manager.list()[0]).toMatchObject({ namespaceMigration: 'pending' });
+    expect(manager.list()[0]?.namespace).toBeUndefined();
+
+    prefixStore.remember('org-acme', 'acme');
+    await manager.reconcilePendingRootNamespaces(true);
+    expect(manager.list()[0]).toMatchObject({ namespace: 'acme' });
+    expect(manager.list()[0]?.namespaceMigration).toBeUndefined();
+  });
+
   it('waits for a failed market read before committing an old organization install', async () => {
     await plantLegacyInstall('hello');
     let readFails = true;

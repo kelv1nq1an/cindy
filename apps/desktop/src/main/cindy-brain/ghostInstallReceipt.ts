@@ -11,6 +11,7 @@ import {
   parsePluginInstallRelId,
   PLUGIN_NS_INSTALL_ROOT,
   pluginInstallRelId,
+  pluginStoragePart,
 } from '../../shared/pluginIdentity.js';
 import {
   GHOST_LOCALE_MAX_BYTES,
@@ -882,8 +883,11 @@ export class GhostInstallReceiptStore {
         let pendingNames = [];
         try {
           pendingNames = fs.readdirSync(path.join(nsRoot, nsEntry.name));
-        } catch {
-          continue;
+        } catch (error) {
+          return {
+            state: 'unreadable',
+            reason: error instanceof Error ? error.message : String(error),
+          };
         }
         for (const name of pendingNames) {
           if (!name.startsWith('.pending-') || !name.endsWith('.json')) continue;
@@ -1041,7 +1045,9 @@ function isValidUniqueGhostIdArray(value: unknown): value is string[] {
 }
 
 function isManagedBackupDirName(id: string, name: string): boolean {
-  return new RegExp(`^\\.cindy-updating-${escapeRegExp(id)}-[0-9a-f]{8}$`).test(name);
+  const identity = parsePluginInstallRelId(id);
+  if (!identity) return false;
+  return new RegExp(`^\\.cindy-updating-${escapeRegExp(pluginStoragePart(identity))}-[0-9a-f]{8}$`).test(name);
 }
 
 function escapeRegExp(value: string): string {

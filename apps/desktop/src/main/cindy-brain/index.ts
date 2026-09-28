@@ -130,7 +130,11 @@ import {
   hasDeliveryNamespace,
   deliveryNamespaceFields,
 } from '../../shared/pluginIdentity.js';
-import { classifyNamespaceMigration, readNamespaceMigrationMarketRecord } from './ghostNamespaceMigration.js';
+import {
+  classifyNamespaceMigration,
+  readNamespaceMigrationInstallOrigin,
+  readNamespaceMigrationMarketRecord,
+} from './ghostNamespaceMigration.js';
 import {
   clearBuiltinTombstone,
   listEligibleBuiltinCommands,
@@ -2961,11 +2965,13 @@ function classifyPendingNamespaceForGhost(
       pluginPrefix: prefix.kind === 'known' ? prefix.pluginPrefix : null,
     };
   }
-  const facts = loadGhostFirstPartyFactsForGhost(ghostId, 'runtime');
+  const installOrigin = readNamespaceMigrationInstallOrigin(() =>
+    getGhostManager().readApprovedInstallOriginStrict(ghostId),
+  );
   return classifyNamespaceMigration({
     ghostId,
     builtin,
-    installOrigin: facts.kind === 'ready' ? facts.facts.installOrigin : 'manual',
+    installOrigin,
     marketSyncCompleted,
     marketRecord,
     currentOrganization,

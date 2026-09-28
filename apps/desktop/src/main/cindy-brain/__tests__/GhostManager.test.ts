@@ -1860,6 +1860,62 @@ describe('GhostManager · 装入/更新崩溃窗口恢复(事务标记)', () => 
     });
   });
 
+  it.each(['EACCES', 'EIO'])('namespaced journal directory %s keeps an interrupted update isolated and recoverable', async (errorCode) => {
+    await manager.install(
+      await makeCindy('ns-before.cindy', goodManifest(), { 'main.js': '// old bytes\n' }),
+      { namespace: 'acme' },
+    );
+    const finalDir = path.join(rootDir, '_ns', 'acme', 'hello');
+    const backupName = '.cindy-updating-_ns__acme__hello-abcdef12';
+    const backupDir = path.join(rootDir, backupName);
+    const stateDir = path.join(workDir, 'ghosts-install-state', '_ns', 'acme');
+    const marker = path.join(stateDir, '.pending-hello.json');
+    await fs.promises.writeFile(marker, JSON.stringify({
+      version: 1,
+      id: '_ns/acme/hello',
+      kind: 'update',
+      packageSha256: 'f'.repeat(64),
+      receiptRevision: crypto.randomUUID(),
+      backupDirName: backupName,
+      phase: 'published',
+    }));
+    await fs.promises.rename(finalDir, backupDir);
+    await fs.promises.mkdir(finalDir, { recursive: true });
+    await fs.promises.writeFile(
+      path.join(finalDir, 'ghost.json'),
+      JSON.stringify({ ...goodManifest(), version: '1.0.1' }),
+    );
+    await fs.promises.writeFile(path.join(finalDir, 'main.js'), '// new bytes\n');
+
+    const realReaddirSync = fs.readdirSync;
+    const spy = vi.spyOn(fs, 'readdirSync').mockImplementation(((target: fs.PathLike, options?: unknown) => {
+      if (path.resolve(String(target)) === path.resolve(stateDir)) {
+        throw Object.assign(new Error(errorCode + ': organization journal unavailable'), { code: errorCode });
+      }
+      return (realReaddirSync as (...args: unknown[]) => unknown)(target, options);
+    }) as typeof fs.readdirSync);
+    let recovered: GhostManager;
+    try {
+      recovered = freshManager();
+    } finally {
+      spy.mockRestore();
+    }
+
+    expect(recovered.list()[0]).toMatchObject({ enabled: false, approval: { state: 'invalid' } });
+    expect(fs.existsSync(backupDir)).toBe(true);
+    expect(fs.existsSync(marker)).toBe(true);
+
+    await recovered.retryInterruptedMutationsAfterDbReady();
+    expect(recovered.list()[0]).toMatchObject({
+      manifest: { version: '1.0.0' },
+      enabled: true,
+      approval: { state: 'approved' },
+    });
+    expect(fs.existsSync(marker)).toBe(false);
+    expect(fs.existsSync(backupDir)).toBe(false);
+    expect(fs.readFileSync(path.join(finalDir, 'main.js'), 'utf8')).toBe('// old bytes\n');
+  });
+
   it('pending marker 读取 EACCES 时保留 marker/final/backup，不降级到 orphan cleanup', async () => {
     await manager.install(await makeCindy('a.cindy', goodManifest()));
     const backupDir = path.join(rootDir, '.cindy-updating-hello-abcdef12');
