@@ -254,6 +254,7 @@ export interface GhostManagerOptions {
   onNamespaceCommitted?: (ghostId: string, namespace: string | null) => void;
   /** Stop runtime/broker for the physical instance before its directory is renamed. */
   onBeforePhysicalRelocate?: (fromRelId: string) => void | Promise<void>;
+  onValidatePhysicalRelocation?: (fromRelId: string, toRelId: string) => void | Promise<void>;
   /** Restore a resident runtime when relocation was cancelled before bytes moved. */
   onPhysicalRelocateAborted?: (fromRelId: string) => void;
   /** Restart a resident runtime under its new physical identity after data is committed. */
@@ -1347,6 +1348,11 @@ export class GhostManager {
       return { code: 'io', reason: '意识正在更新，请稍后重试' };
     }
     try {
+      await this.options.onValidatePhysicalRelocation?.(ghostId, destRel);
+    } catch (error) {
+      return { code: 'io', reason: error instanceof Error ? error.message : String(error) };
+    }
+    try {
       await this.options.onBeforePhysicalRelocate?.(ghostId);
     } catch (error) {
       this.options.onPhysicalRelocateAborted?.(ghostId);
@@ -1514,6 +1520,19 @@ export class GhostManager {
     } catch {
       return undefined;
     }
+  }
+
+  isPendingLegacyForge(id: string): boolean {
+    return this.isPendingLegacyNamespace(id) && this.readEffectiveInstallOrigin(id) === 'agent-forge';
+  }
+
+  isPendingLegacyNamespace(id: string): boolean {
+    this.ensureCurrentOwnerContextSync();
+    const identity = parsePluginInstallRelId(id);
+    if (!identity || identity.namespace !== null) return false;
+    const ledger = this.loadNamespaceMigrationLedger();
+    return isPendingNamespaceGhost(ledger, id) &&
+      this.readDeliveryNamespace(id) === undefined;
   }
 
   /**

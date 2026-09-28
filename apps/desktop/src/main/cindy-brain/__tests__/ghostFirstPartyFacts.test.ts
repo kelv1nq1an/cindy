@@ -391,6 +391,19 @@ describe('loadGhostFirstPartyFactsLoader', () => {
     }
   });
 
+  it('distinguishes a censused legacy Forge from a new missing-namespace install', () => {
+    const factsLoader = loader({
+      lookupOrganizationPrefix: () => ({ kind: 'known', pluginPrefix: 'acme' }),
+      readInstallOrigin: () => 'agent-forge',
+      isPendingLegacyForge: (id) => id === 'acme-old',
+    });
+    const legacy = factsLoader.load('acme-old', 'runtime', ORG_A);
+    expect(legacy).toMatchObject({ kind: 'ready', facts: { legacyPendingForge: true } });
+    if (legacy.kind === 'ready') expect(authorizeGhostTokenBroker('acme-old', legacy)).toBe(true);
+    const fresh = factsLoader.load('acme-new', 'install', ORG_A, { installOrigin: 'agent-forge' });
+    if (fresh.kind === 'ready') expect(authorizeGhostTokenBroker('acme-new', fresh)).toBe(false);
+  });
+
   it('lets install-time namespace override win over a free-name ghost id', () => {
     const factsLoader = loader({
       lookupOrganizationPrefix: () => ({ kind: 'known', pluginPrefix: null }),

@@ -87,6 +87,7 @@ export interface GhostFirstPartyFacts {
   currentOrganization: GhostFirstPartyCurrentOrganization | null;
   /** 仅显式 ghost_forge_install 写入 agent-forge；其它入口均为 manual。 */
   installOrigin: 'manual' | 'agent-forge';
+  legacyPendingForge?: boolean;
 }
 
 function isCurrentOrganizationRecord(
@@ -120,6 +121,18 @@ export function marketInstallationMatchesApprovedPackage(
   );
 }
 
+export function isTrustedMivoSecretAlias(facts: GhostFirstPartyFacts, pendingLegacy: boolean): boolean {
+  if (facts.ghostId !== 'xd-mivo') return false;
+  if (facts.builtin) return true;
+  const record = facts.marketRecord;
+  const organization = facts.currentOrganization;
+  if (!record || record.source !== 'market' || record.scope !== 'organization' ||
+      !record.installed || organization?.orgSlug !== 'xd' ||
+      record.organizationId !== organization.organizationId) return false;
+  return (facts.namespace === 'xd' || (facts.namespace === null && pendingLegacy)) &&
+    marketInstallationMatchesApprovedPackage(record, organization);
+}
+
 function allow(basis: GhostFirstPartyBasis, hostPrimitiveEligible: boolean): GhostFirstPartyPrivilege {
   return { brokerEligible: true, hostPrimitiveEligible, basis };
 }
@@ -148,7 +161,11 @@ export function resolveGhostFirstPartyPrivilege(facts: GhostFirstPartyFacts): Gh
   // 宿主原语仍保持拒绝。
   if (facts.installOrigin === 'agent-forge') {
     const orgSlug = facts.currentOrganization?.orgSlug;
-    if (!orgSlug || facts.namespace !== orgSlug) {
+    const legacyMatchesCurrentOrg = facts.legacyPendingForge === true &&
+      facts.namespace === null &&
+      !!facts.currentOrganization?.pluginPrefix &&
+      facts.ghostId.startsWith(facts.currentOrganization.pluginPrefix + '-');
+    if (!orgSlug || (facts.namespace !== orgSlug && !legacyMatchesCurrentOrg)) {
       return deny(facts.currentOrganization ? 'denied-foreign-org' : 'denied-unknown-origin');
     }
     return allow('forge-current-org', false);
@@ -181,7 +198,8 @@ export function resolveGhostFirstPartyPrivilege(facts: GhostFirstPartyFacts): Gh
       if (!marketInstallationMatchesApprovedPackage(record, facts.currentOrganization)) {
         return deny('denied-unknown-origin');
       }
-      return allow('market-organization-current', isOfficialGhostId(facts.ghostId));
+      return allow('market-organization-current', facts.namespace === 'xd' &&
+        facts.currentOrganization?.orgSlug === 'xd' && facts.ghostId.startsWith('xd-'));
     }
     return deny('denied-unknown-origin');
   }

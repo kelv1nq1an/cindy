@@ -347,7 +347,7 @@ import {
   type GhostFirstPartyPendingMarketRecord,
   type GhostFirstPartyFactsPurpose,
 } from './ghostFirstPartyFacts.js';
-import { authorizeGhostHostPrimitive, authorizeGhostTokenBroker } from './ghostFirstPartyPrivilege.js';
+import { authorizeGhostHostPrimitive, authorizeGhostTokenBroker, isTrustedMivoSecretAlias } from './ghostFirstPartyPrivilege.js';
 import { ghostTokenBrokerInstallError } from './ghostTokenBrokerInstallError.js';
 import { ghostBrokerRedirectPortInstallError } from './ghostBrokerRedirectPort.js';
 import { ConnectionTokenProvider, type IssuedConnectionToken } from './connectionTokenProvider.js';
@@ -407,7 +407,9 @@ import {
   readGhostSecretTail,
   removeGhostSecret,
   migrateGhostSecrets,
+  assertGhostSecretsCanRelocate,
   removeGhostSecrets,
+  setMivoSecretAliasVerifier,
   storeGhostSecret,
 } from '../secrets/providerSecretStore.js';
 import { getActiveCatalog, getXdGatewayModels } from '../maker-host/active-catalog.js';
@@ -1364,10 +1366,9 @@ function plannedOwnedRelocate(fromPath: string, toPath: string): { from: string;
   return { from: fromPath, to: toPath };
 }
 
-async function relocateGhostUserData(fromPart: string, toPart: string): Promise<void> {
-  if (fromPart === toPart) return;
+function planGhostUserDataRelocation(fromPart: string, toPart: string): Array<{ from: string; to: string }> {
   const kvDir = ownerScopedUserDataPath('ghost-kv');
-  const planned = [
+  return [
     plannedOwnedRelocate(path.join(kvDir, `${fromPart}.json`), path.join(kvDir, `${toPart}.json`)),
     plannedOwnedRelocate(
       ownerScopedUserDataPath('ghost-fs', fromPart),
@@ -1382,8 +1383,14 @@ async function relocateGhostUserData(fromPart: string, toPart: string): Promise<
       ownerScopedUserDataPath('library-staging', toPart),
     ),
   ].filter((move): move is { from: string; to: string } => move !== null);
+}
+
+async function relocateGhostUserData(fromPart: string, toPart: string): Promise<void> {
+  if (fromPart === toPart) return;
+  const planned = planGhostUserDataRelocation(fromPart, toPart);
   const moved: Array<{ from: string; to: string }> = [];
   let secretsMoved = false;
+  let bindingMoved = false;
   try {
     for (const move of planned) {
       relocateOwnedPath(move.from, move.to);
@@ -1392,7 +1399,16 @@ async function relocateGhostUserData(fromPart: string, toPart: string): Promise<
     migrateGhostSecrets(fromPart, toPart);
     secretsMoved = true;
     await getGhostLibraryBindingStore().relocateBinding(fromPart, toPart);
+    bindingMoved = true;
+    await ledger.relocateGhostMediaRefs(fromPart, toPart);
   } catch (error) {
+    if (bindingMoved) {
+      try {
+        await getGhostLibraryBindingStore().relocateBinding(toPart, fromPart);
+      } catch {
+        /* keep failing closed on the original error */
+      }
+    }
     if (secretsMoved) {
       try {
         migrateGhostSecrets(toPart, fromPart);
@@ -1701,6 +1717,16 @@ export function getGhostManager(): GhostManager {
           await getGhostNodeRuntimeBroker().stopAndWait(part);
           getGhostRuntime().resetFuse(part);
         }
+      },
+      onValidatePhysicalRelocation: async (fromRelId, toRelId) => {
+        const fromIdentity = parsePluginInstallRelId(fromRelId);
+        const toIdentity = parsePluginInstallRelId(toRelId);
+        if (!fromIdentity || !toIdentity) throw new Error('relocate identities are invalid');
+        const fromPart = pluginStoragePart(fromIdentity);
+        const toPart = pluginStoragePart(toIdentity);
+        planGhostUserDataRelocation(fromPart, toPart);
+        assertGhostSecretsCanRelocate(fromPart, toPart);
+        await getGhostLibraryBindingStore().assertCanRelocateBinding(fromPart, toPart);
       },
       onPhysicalRelocateAborted: (fromRelId) => {
         const ghost = findGhostForInstanceId(fromRelId);
@@ -3012,6 +3038,7 @@ function getGhostFirstPartyFactsLoader(): GhostFirstPartyFactsLoader {
         ).lookup(orgId),
       readInstallOrigin: (ghostId) => getGhostManager().readEffectiveInstallOrigin(ghostId),
       readInstallNamespace: (ghostId) => getGhostManager().readDeliveryNamespace(ghostId),
+      isPendingLegacyForge: (ghostId) => getGhostManager().isPendingLegacyForge(ghostId),
     });
   }
   return ghostFirstPartyFactsLoaderSingleton;
@@ -3046,6 +3073,14 @@ export function loadGhostFirstPartyFactsForGhost(
     overrides,
   );
 }
+
+setMivoSecretAliasVerifier((ghostId) => {
+  const loaded = loadGhostFirstPartyFactsForGhost(ghostId, 'runtime');
+  if (loaded.kind !== 'ready') return false;
+  const pendingLegacy = loaded.facts.namespace === null &&
+    getGhostManager().isPendingLegacyNamespace(ghostId);
+  return isTrustedMivoSecretAlias(loaded.facts, pendingLegacy);
+});
 
 function isGhostTokenBrokerAuthorized(
   ghostId: string,

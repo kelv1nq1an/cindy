@@ -51,6 +51,7 @@ import {
   readCustomProviderKeyForMutation,
   readGhostSecretStrict,
   readGhostSecretTailFromIo,
+  setMivoSecretAliasVerifier,
   resolveOwnerScopedSecretStorageKey,
   setProviderSecretsClearedListener,
   UNRECOVERABLE_PROVIDER_CREDENTIAL,
@@ -161,14 +162,14 @@ describe('providerSecrets registry', () => {
     expect(ghostSecretHintStorageKey('_ns__acme__helper', 'token')).toBe(
       'ghost_hint__ns__acme__helper_token',
     );
-    expect(ghostSecretStorageKey('_ns__xd__xd-mivo', 'mivo_api_key')).toBe(
-      ghostSecretStorageKey('xd-mivo', 'mivo_api_key'),
+    expect(ghostSecretStorageKey('_ns__xd__xd-mivo', 'mivo_api_key', true)).toBe(
+      ghostSecretStorageKey('xd-mivo', 'mivo_api_key', true),
     );
     expect(ghostSecretStorageKey('_ns__acme__xd-mivo', 'mivo_api_key')).toBe(
       'ghost_secret__ns__acme__xd-mivo_mivo_api_key',
     );
     expect(ghostSecretStorageKey('_ns__acme__xd-mivo', 'mivo_api_key')).not.toBe(
-      ghostSecretStorageKey('xd-mivo', 'mivo_api_key'),
+      ghostSecretStorageKey('xd-mivo', 'mivo_api_key', true),
     );
   });
 
@@ -183,7 +184,9 @@ describe('providerSecrets registry', () => {
   });
 
   it('官方别名:xd-mivo 的 mivo_api_key 映射到历史 mivo 存储键(老用户零迁移)', () => {
-    expect(ghostSecretStorageKey('xd-mivo', 'mivo_api_key')).toBe(providerSecretStorageKey('mivo'));
+    expect(ghostSecretStorageKey('xd-mivo', 'mivo_api_key', true)).toBe(providerSecretStorageKey('mivo'));
+    expect(ghostSecretStorageKey('xd-mivo', 'mivo_api_key')).not.toBe(providerSecretStorageKey('mivo'));
+    expect(ghostSecretStorageKey('_ns__xd__xd-mivo', 'mivo_api_key')).not.toBe(providerSecretStorageKey('mivo'));
     expect(ghostSecretStorageKey('xd-mivo', 'other_key')).toBe('ghost_secret_xd-mivo_other_key');
     expect(ghostSecretStorageKey('third-party', 'mivo_api_key')).toBe('ghost_secret_third-party_mivo_api_key');
   });
@@ -378,9 +381,21 @@ describe('readGhostSecretTailFromIo(尾指纹读取 + 老键懒回填)', () => {
   });
 
   it('官方别名键(xd-mivo 老用户)同样能懒回填', () => {
-    io.store.set(ghostSecretStorageKey('xd-mivo', 'mivo_api_key'), 'mivo_legacy_key_9999');
+    setMivoSecretAliasVerifier((id) => id === 'xd-mivo');
+    io.store.set(ghostSecretStorageKey('xd-mivo', 'mivo_api_key', true), 'mivo_legacy_key_9999');
     expect(readGhostSecretTailFromIo(io, 'xd-mivo', 'mivo_api_key')).toBe('9999');
     expect(io.store.get(ghostSecretHintStorageKey('xd-mivo', 'mivo_api_key'))).toBe('9999');
+    setMivoSecretAliasVerifier(null);
+  });
+
+  it('a name-only Mivo cannot read the historical secret or its cached hint', () => {
+    io.store.set(ghostSecretStorageKey('xd-mivo', 'mivo_api_key', true), 'mivo_legacy_key_9999');
+    io.store.set(ghostSecretHintStorageKey('xd-mivo', 'mivo_api_key'), '9999');
+    setMivoSecretAliasVerifier(null);
+    expect(readGhostSecretTailFromIo(io, 'xd-mivo', 'mivo_api_key')).toBeNull();
+    setMivoSecretAliasVerifier((id) => id === 'xd-mivo');
+    expect(readGhostSecretTailFromIo(io, 'xd-mivo', 'mivo_api_key')).toBe('9999');
+    setMivoSecretAliasVerifier(null);
   });
 
   it('没存过 / 值太短不产指纹 → null 且不落回填键', () => {

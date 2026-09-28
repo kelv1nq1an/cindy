@@ -77,6 +77,7 @@ export interface LoadGhostFirstPartyFactsLoaderOptions {
    * `null` is root. Do not invent the current org slug here.
    */
   readInstallNamespace?(ghostId: string): string | null | undefined;
+  isPendingLegacyForge?(ghostId: string): boolean;
 }
 
 function actionFor(purpose: GhostFirstPartyFactsPurpose): GhostFirstPartyFactsUnavailableAction {
@@ -142,6 +143,8 @@ export function loadGhostFirstPartyFactsLoader(
           : options.readInstallNamespace?.(installRelId);
       const namespace =
         recordedNamespace !== undefined ? recordedNamespace : (parsed?.namespace ?? null);
+      const legacyPendingForge = purpose === 'runtime' && recordedNamespace === undefined &&
+        namespace === null && options.isPendingLegacyForge?.(installRelId) === true;
       const unavailable = (
         reason: GhostFirstPartyFactsUnavailableReason,
       ): GhostFirstPartyFactsLoad => ({
@@ -198,6 +201,7 @@ export function loadGhostFirstPartyFactsLoader(
             marketRecord,
             currentOrganization: null,
             installOrigin,
+            ...(legacyPendingForge ? { legacyPendingForge: true } : {}),
           },
         };
       }
@@ -219,7 +223,7 @@ export function loadGhostFirstPartyFactsLoader(
        */
       const builtinOnlyFacts = (): GhostFirstPartyFactsLoad => ({
         kind: 'ready',
-        facts: { ghostId: logicalGhostId, namespace, builtin, marketRecord, currentOrganization: null, installOrigin },
+        facts: { ghostId: logicalGhostId, namespace, builtin, marketRecord, currentOrganization: null, installOrigin, ...(legacyPendingForge ? { legacyPendingForge: true } : {}) },
       });
 
       let lookup: OrganizationPrefixLookup;
@@ -244,6 +248,7 @@ export function loadGhostFirstPartyFactsLoader(
               orgSlug: identity.orgSlug ?? null,
             },
             installOrigin,
+            ...(legacyPendingForge ? { legacyPendingForge: true } : {}),
           },
         };
       }

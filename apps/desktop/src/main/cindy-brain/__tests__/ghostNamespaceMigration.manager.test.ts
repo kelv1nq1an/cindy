@@ -353,6 +353,28 @@ describe('GhostManager namespace migration census', () => {
     expect(fs.existsSync(path.join(rootDir, '_ns', 'acme', 'hello', 'ghost.json'))).toBe(true);
   });
 
+  it('leaves the approved occupant usable when preflight finds conflicting user data', async () => {
+    await plantLegacyInstall('hello');
+    manager.list();
+    await manager.commitPendingNamespace('hello', 'acme', 'market-organization');
+    manager = new GhostManager({
+      getRootDir: () => rootDir,
+      mutateSnapshot: async ({ parentDir, ...request }) => {
+        await runGhostSnapshotWorkerRequest(request, parentDir);
+      },
+      onValidatePhysicalRelocation: () => { throw new Error('relocate destination already exists'); },
+    });
+    const rootCindy = await makeCindy('hello');
+    await expect(manager.install(rootCindy)).resolves.toMatchObject({ rejection: { code: 'io' } });
+    expect(fs.existsSync(path.join(rootDir, 'hello', 'ghost.json'))).toBe(true);
+    expect(manager.list()).toEqual([expect.objectContaining({ approval: expect.objectContaining({ state: 'approved' }) })]);
+    const receipts = new GhostInstallReceiptStore(
+      () => path.join(workDir, 'ghosts-install-state'),
+      async () => undefined,
+    );
+    expect(receipts.readPendingMutationSync('hello').state).toBe('missing');
+  });
+
   it('installs and verifies a namespaced skill snapshot under its physical identity', async () => {
     const zip = new JSZip();
     zip.file('ghost.json', JSON.stringify({

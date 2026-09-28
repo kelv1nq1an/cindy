@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   FIRST_PARTY_ALIAS_GHOST_IDS,
+  isTrustedMivoSecretAlias,
   authorizeGhostHostPrimitive,
   authorizeGhostTokenBroker,
   resolveGhostFirstPartyPrivilege,
@@ -51,6 +52,20 @@ function market(
 }
 
 describe('resolveGhostFirstPartyPrivilege', () => {
+  it('binds the Mivo historical key to a real XD installation, not the plugin name', () => {
+    const xdOrganization = { organizationId: 'org-xd', orgSlug: 'xd', pluginPrefix: 'xd' };
+    const trusted = facts({
+      ghostId: 'xd-mivo', namespace: 'xd', currentOrganization: xdOrganization,
+      marketRecord: market({ scope: 'organization', organizationId: 'org-xd' }),
+    });
+    expect(isTrustedMivoSecretAlias(trusted, false)).toBe(true);
+    expect(isTrustedMivoSecretAlias({ ...trusted, namespace: null }, true)).toBe(true);
+    expect(isTrustedMivoSecretAlias({ ...trusted, namespace: null }, false)).toBe(false);
+    expect(isTrustedMivoSecretAlias({ ...trusted, installOrigin: 'agent-forge', marketRecord: null }, true)).toBe(false);
+    expect(isTrustedMivoSecretAlias({ ...trusted, currentOrganization: CURRENT_ORG }, false)).toBe(false);
+    expect(isTrustedMivoSecretAlias({ ...trusted, marketRecord: market({ scope: 'organization', organizationId: 'org-xd', source: 'legacy-adopted' }) }, false)).toBe(false);
+    expect(isTrustedMivoSecretAlias({ ...trusted, marketRecord: market({ scope: 'organization', organizationId: 'org-xd', approvedPackageSha256: null }) }, false)).toBe(false);
+  });
   // 纯函数分支测试:用 xd-feishu / xd-atlassian 作为代表性官方前缀 id，验证
   // builtin + 官方前缀会同时得到 Broker 与宿主原语；这不表示它们随发行包分发。
   // `currentOrganization: null` 与 `marketRecord: null` 在这里**显式写出**,不吃
@@ -237,7 +252,7 @@ describe('resolveGhostFirstPartyPrivilege', () => {
           ghostId: 'xd-feishu',
           namespace: 'xd',
           marketRecord: market({ scope: 'organization', organizationId: 'org-acme' }),
-          currentOrganization: CURRENT_ORG,
+          currentOrganization: { organizationId: 'org-acme', pluginPrefix: 'xd', orgSlug: 'xd' },
         }),
       ),
     ).toEqual({
@@ -294,13 +309,14 @@ describe('resolveGhostFirstPartyPrivilege', () => {
       resolveGhostFirstPartyPrivilege(
         facts({
           ghostId: 'xd-evil',
+          namespace: 'acme',
           marketRecord: market({ scope: 'organization', organizationId: 'org-acme' }),
           currentOrganization: CURRENT_ORG,
         }),
       ),
     ).toEqual({
       brokerEligible: true,
-      hostPrimitiveEligible: true,
+      hostPrimitiveEligible: false,
       basis: 'market-organization-current',
     });
   });
@@ -560,6 +576,21 @@ describe('resolveGhostFirstPartyPrivilege', () => {
       hostPrimitiveEligible: false,
       basis: 'denied-foreign-org',
     });
+  });
+
+  it('preserves only a verified pending pre-namespace Forge for its original organization', () => {
+    const pending = facts({
+      ghostId: 'acme-helper',
+      currentOrganization: CURRENT_ORG,
+      installOrigin: 'agent-forge',
+      legacyPendingForge: true,
+    });
+    expect(resolveGhostFirstPartyPrivilege(pending).brokerEligible).toBe(true);
+    expect(resolveGhostFirstPartyPrivilege({ ...pending, legacyPendingForge: false }).brokerEligible).toBe(false);
+    expect(resolveGhostFirstPartyPrivilege({ ...pending, ghostId: 'helper' }).brokerEligible).toBe(false);
+    expect(resolveGhostFirstPartyPrivilege({ ...pending, currentOrganization: {
+      organizationId: 'org-b', pluginPrefix: 'beta', orgSlug: 'beta',
+    } }).brokerEligible).toBe(false);
   });
 
   it('fail-closes unknown origin, missing prefix, and unmatched prefix', () => {

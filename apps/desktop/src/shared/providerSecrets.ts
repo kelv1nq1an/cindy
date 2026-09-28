@@ -232,22 +232,25 @@ const GHOST_SECRET_STORAGE_ALIASES: Record<string, Record<string, string>> = {
  * ghostId 规则 /^[a-z0-9][a-z0-9-]{0,31}$/、secretKey 规则 /^[a-z][a-z0-9_]{0,31}$/
  * (validateGhostManifest 已把关),此处按惯例在键名构造点再断言一次。
  */
-function ghostSecretAliasOwner(ghostId: string): string {
+function ghostSecretAliasOwner(ghostId: string, allowMivoAlias: boolean): string {
   const identity = parsePluginStoragePart(ghostId) ?? parsePluginInstallRelId(ghostId);
   const logicalId = identity?.ghostId ?? ghostId;
   const namespace = identity?.namespace ?? null;
   // Trusted XD Mivo keeps the historical machine-level key. Other orgs' xd-mivo
   // instances must not share that alias.
-  if (logicalId === 'xd-mivo' && (namespace === null || namespace === 'xd')) {
+  if (allowMivoAlias && logicalId === 'xd-mivo' && (namespace === null || namespace === 'xd')) {
     return 'xd-mivo';
   }
   return ghostId;
 }
 
-export function ghostSecretStorageKey(ghostId: string, secretKey: string): string {
+export function ghostSecretStorageKey(ghostId: string, secretKey: string, allowMivoAlias = false): string {
   assertSafeKeyPart(ghostId, 'ghostId');
   assertSafeKeyPart(secretKey, 'secretKey');
-  const alias = GHOST_SECRET_STORAGE_ALIASES[ghostSecretAliasOwner(ghostId)]?.[secretKey];
+  const aliasOwner = ghostSecretAliasOwner(ghostId, allowMivoAlias);
+  const alias = (allowMivoAlias || aliasOwner !== 'xd-mivo')
+    ? GHOST_SECRET_STORAGE_ALIASES[aliasOwner]?.[secretKey]
+    : undefined;
   if (alias) return alias;
   return `${GHOST_SECRET_PREFIX}${ghostId}_${secretKey}`;
 }

@@ -114,6 +114,16 @@ describe('LibraryBindingStore', () => {
     expect(await store.getBinding('hello')).not.toBeNull();
   });
 
+  it('detects a binding conflict before moving the plugin directory', async () => {
+    const store = new LibraryBindingStore(deps);
+    await store.setBinding('hello', candidate);
+    await store.setBinding('_ns__acme__hello', candidate);
+    await expect(store.assertCanRelocateBinding('hello', '_ns__acme__hello')).rejects.toThrow(
+      'library binding destination already exists',
+    );
+    expect(await store.getBinding('hello')).not.toBeNull();
+  });
+
 
   it('refuses to relocate onto an existing custom library folder without deleting source', async () => {
     const store = new LibraryBindingStore(deps);

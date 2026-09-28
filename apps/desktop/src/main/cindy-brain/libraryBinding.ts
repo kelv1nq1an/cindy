@@ -294,6 +294,20 @@ export class LibraryBindingStore {
     return this.readData().then((d) => d.bindings[ghostId] ?? null);
   }
 
+  async assertCanRelocateBinding(fromGhostId: string, toGhostId: string): Promise<void> {
+    const data = await this.readData();
+    const record = data.bindings[fromGhostId];
+    if (!record) return;
+    if (data.bindings[toGhostId]) {
+      throw new Error(`library binding destination already exists: ${toGhostId}`);
+    }
+    const fromRoot = path.join(record.root, fromGhostId);
+    const toRoot = path.join(record.root, toGhostId);
+    if (fs.existsSync(fromRoot) && fs.existsSync(toRoot)) {
+      throw new Error(`library custom root destination already exists: ${toRoot}`);
+    }
+  }
+
   /** Move a custom binding key after a physical instance relocate. */
   async relocateBinding(fromGhostId: string, toGhostId: string): Promise<void> {
     if (fromGhostId === toGhostId) return;
