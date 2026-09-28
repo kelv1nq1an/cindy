@@ -13,6 +13,7 @@ import { isValidGhostId, isValidGhostNetworkHostPattern } from '../../shared/gho
 import type { GhostManifest } from '../../shared/ghost.js';
 import { parsePluginInstanceId } from '../../shared/pluginIdentity.js';
 import type { PluginMarketInstallationRecord } from '../plugin-market/ledger.js';
+import { matchesPendingLegacyForge } from './ghostFirstPartyPrivilege.js';
 import {
   verifyInstalledMarketManifest,
   type InstalledMarketManifestIdentity,
@@ -96,6 +97,7 @@ export interface LoadConnectionAudienceResolverOptions {
   readInstallOrigin?(ghostId: string): 'manual' | 'agent-forge';
   /** Trusted receipt namespace. undefined means no delivery field. */
   readInstallNamespace?(ghostId: string): string | null | undefined;
+  isPendingLegacyForge?(ghostId: string): boolean;
   lookupOrganizationPrefix?(
     orgId: string,
   ): { kind: 'known'; pluginPrefix: string | null } | { kind: 'absent' } | { kind: 'unavailable' };
@@ -165,7 +167,21 @@ export function loadConnectionAudienceResolver(
         const parsedNamespace = parsePluginInstanceId(ghostId)?.namespace ?? null;
         const recordedNamespace = options.readInstallNamespace?.(ghostId);
         const namespace = recordedNamespace !== undefined ? recordedNamespace : parsedNamespace;
-        if (identity.orgSlug && namespace === identity.orgSlug) {
+        let pendingLegacyForCurrentOrg = false;
+        if (recordedNamespace === undefined && parsedNamespace === null) {
+          try {
+            const prefix = options.lookupOrganizationPrefix?.(identity.orgId);
+            pendingLegacyForCurrentOrg = prefix?.kind === 'known' && matchesPendingLegacyForge(
+              pluginSlug,
+              namespace,
+              options.isPendingLegacyForge?.(ghostId) === true,
+              prefix.pluginPrefix,
+            );
+          } catch {
+            pendingLegacyForCurrentOrg = false;
+          }
+        }
+        if (identity.orgSlug && (namespace === identity.orgSlug || pendingLegacyForCurrentOrg)) {
           const approvedSha = options.readApprovedPackageSha256?.(ghostId) ?? null;
           if (!approvedSha || !/^[a-f0-9]{64}$/.test(approvedSha)) {
             return reject('forge-package-sha-missing');

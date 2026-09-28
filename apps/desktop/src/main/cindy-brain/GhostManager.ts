@@ -960,7 +960,10 @@ export class GhostManager {
       this.ensureCurrentOwnerContextSync();
       await Promise.allSettled([...this.pendingRecoverySideEffects]);
       if (this.currentOwnerContextKey() !== ownerContextKey) return;
-      this.recoverInterruptedMutationsSync();
+      await this.runExclusiveMutation(async () => {
+        if (this.currentOwnerContextKey() !== ownerContextKey) return;
+        this.recoverInterruptedMutationsSync();
+      });
       await Promise.allSettled([...this.pendingRecoverySideEffects]);
     })();
     this.recoveryRetry = retry;

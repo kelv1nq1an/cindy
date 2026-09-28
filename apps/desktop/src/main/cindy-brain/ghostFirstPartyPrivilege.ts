@@ -141,6 +141,15 @@ function deny(basis: Extract<GhostFirstPartyBasis, `denied-${string}`>): GhostFi
   return { brokerEligible: false, hostPrimitiveEligible: false, basis };
 }
 
+export function matchesPendingLegacyForge(
+  ghostId: string,
+  namespace: string | null,
+  pending: boolean,
+  pluginPrefix: string | null,
+): boolean {
+  return pending && namespace === null && !!pluginPrefix && ghostId.startsWith(pluginPrefix + '-');
+}
+
 /**
  * Pure first-party privilege conclusion from already-collected facts.
  * Does not read disk, ledger, or Electron.
@@ -161,10 +170,12 @@ export function resolveGhostFirstPartyPrivilege(facts: GhostFirstPartyFacts): Gh
   // 宿主原语仍保持拒绝。
   if (facts.installOrigin === 'agent-forge') {
     const orgSlug = facts.currentOrganization?.orgSlug;
-    const legacyMatchesCurrentOrg = facts.legacyPendingForge === true &&
-      facts.namespace === null &&
-      !!facts.currentOrganization?.pluginPrefix &&
-      facts.ghostId.startsWith(facts.currentOrganization.pluginPrefix + '-');
+    const legacyMatchesCurrentOrg = matchesPendingLegacyForge(
+      facts.ghostId,
+      facts.namespace,
+      facts.legacyPendingForge === true,
+      facts.currentOrganization?.pluginPrefix ?? null,
+    );
     if (!orgSlug || (facts.namespace !== orgSlug && !legacyMatchesCurrentOrg)) {
       return deny(facts.currentOrganization ? 'denied-foreign-org' : 'denied-unknown-origin');
     }

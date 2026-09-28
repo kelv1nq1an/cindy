@@ -1556,6 +1556,52 @@ describe('GhostManager · 装入/更新崩溃窗口恢复(事务标记)', () => 
   const freshManager = () =>
     new GhostManager({ getRootDir: () => rootDir, getLocale: () => hostLocale, onChanged });
 
+  it('does not recover a live update while its directory swap is waiting', async () => {
+    await manager.install(
+      await makeCindy('old.cindy', goodManifest(), { 'main.js': '// old bytes\n' }),
+      { namespace: 'acme' },
+    );
+    const oldApproval = manager.list()[0]!.approval;
+    const finalDir = path.join(rootDir, '_ns', 'acme', 'hello');
+    const marker = path.join(workDir, 'ghosts-install-state', '_ns', 'acme', '.pending-hello.json');
+    let enterRename!: () => void;
+    let resumeRename!: () => void;
+    const renameEntered = new Promise<void>((resolve) => { enterRename = resolve; });
+    const renameGate = new Promise<void>((resolve) => { resumeRename = resolve; });
+    const realRename = fs.promises.rename;
+    const spy = vi.spyOn(fs.promises, 'rename').mockImplementation(async (from, to) => {
+      if (path.resolve(String(from)) === path.resolve(finalDir) &&
+          path.basename(String(to)).startsWith('.cindy-updating-')) {
+        enterRename();
+        await renameGate;
+      }
+      return realRename(from, to);
+    });
+    try {
+      const update = manager.update(
+        await makeCindy('new.cindy', { ...goodManifest(), version: '2.0.0' }, { 'main.js': '// new bytes\n' }),
+        { expectedInstalledApproval: ghostInstallApprovalToken(oldApproval), namespace: 'acme' },
+      );
+      await renameEntered;
+      expect(fs.existsSync(marker)).toBe(true);
+      const retry = manager.retryInterruptedMutationsAfterDbReady();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      const stillProtected = fs.existsSync(marker) && manager.list()[0]?.approval.state === 'invalid';
+      resumeRename();
+      const [updated] = await Promise.all([update, retry]);
+      expect(stillProtected).toBe(true);
+      expect(updated).toHaveProperty('ghost');
+      expect(manager.list()[0]).toMatchObject({
+        manifest: { version: '2.0.0' },
+        approval: { state: 'approved' },
+      });
+      expect(fs.readFileSync(path.join(finalDir, 'main.js'), 'utf8')).toBe('// new bytes\n');
+    } finally {
+      resumeRename();
+      spy.mockRestore();
+    }
+  });
+
   it('rejects cancellation during install preparation before publishing bytes and allows retry', async () => {
     const file = await makeCindy('cancelled.cindy', goodManifest());
     const controller = new AbortController();

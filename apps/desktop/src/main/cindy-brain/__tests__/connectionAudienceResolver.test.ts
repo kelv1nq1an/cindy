@@ -218,6 +218,34 @@ describe('installed Plugin Connection audience resolver', () => {
     });
   });
 
+  it('preserves OIDC for a verified pending legacy Forge receipt in the current organization', () => {
+    const forgeManifest: GhostManifest = { ...manifest, id: 'acme-tool' };
+    const options = {
+      ...resolverOptions(forgeManifest, null),
+      readInstallOrigin: () => 'agent-forge' as const,
+      readInstallNamespace: () => undefined,
+      readApprovedPackageSha256: () => 'a'.repeat(64),
+      isPendingLegacyForge: () => true,
+      lookupOrganizationPrefix: () => ({ kind: 'known' as const, pluginPrefix: 'acme' }),
+    };
+    expect(loadConnectionAudienceResolver(options).resolve('acme-tool', identity)).toMatchObject({
+      audience: 'org-example:acme-tool',
+    });
+    expect(loadConnectionAudienceResolver({ ...options, isPendingLegacyForge: () => false })
+      .resolve('acme-tool', identity)).toBeNull();
+    expect(loadConnectionAudienceResolver({ ...options, lookupOrganizationPrefix: () => ({
+      kind: 'known' as const, pluginPrefix: 'other',
+    }) }).resolve('acme-tool', identity)).toBeNull();
+    expect(loadConnectionAudienceResolver({ ...options, lookupOrganizationPrefix: () => ({
+      kind: 'known' as const, pluginPrefix: null,
+    }) }).resolve('acme-tool', identity)).toBeNull();
+    expect(loadConnectionAudienceResolver({ ...options, readInstallNamespace: () => null })
+      .resolve('acme-tool', identity)).toBeNull();
+    expect(loadConnectionAudienceResolver({ ...options, lookupOrganizationPrefix: () => ({
+      kind: 'unavailable' as const,
+    }) }).resolve('acme-tool', identity)).toBeNull();
+  });
+
   it('does not extend Forge OIDC to a manual install or another organization', () => {
     const forgeManifest: GhostManifest = { ...manifest, id: 'helper' };
     for (const options of [

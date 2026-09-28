@@ -2999,6 +2999,7 @@ function getConnectionAudienceResolver(): ConnectionAudienceResolver {
         getGhostManager().approvedInstallEvidence(ghostId)?.packageSha256 ?? null,
       readInstallOrigin: (ghostId) => getGhostManager().readEffectiveInstallOrigin(ghostId),
       readInstallNamespace: (ghostId) => getGhostManager().readDeliveryNamespace(ghostId),
+      isPendingLegacyForge: (ghostId) => getGhostManager().isPendingLegacyForge(ghostId),
       lookupOrganizationPrefix: (orgId) =>
         createOrganizationPrefixStore(
           ownerScopedUserDataPath('plugin-market', 'organization.v1.json'),
