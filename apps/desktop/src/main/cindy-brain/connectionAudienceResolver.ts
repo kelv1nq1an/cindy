@@ -11,7 +11,7 @@
  */
 import { isValidGhostId, isValidGhostNetworkHostPattern } from '../../shared/ghost.js';
 import type { GhostManifest } from '../../shared/ghost.js';
-import { parsePluginInstanceId } from '../../shared/pluginIdentity.js';
+import { hasDeliveryNamespace, parsePluginInstanceId } from '../../shared/pluginIdentity.js';
 import type { PluginMarketInstallationRecord } from '../plugin-market/ledger.js';
 import { matchesPendingLegacyForge } from './ghostFirstPartyPrivilege.js';
 import {
@@ -235,6 +235,20 @@ export function loadConnectionAudienceResolver(
       }
       if (installation.organizationId !== identity.orgId) {
         return reject('market-installation-org-mismatch');
+      }
+      if (hasDeliveryNamespace(installation)) {
+        let installedNamespace: string | null | undefined;
+        try {
+          installedNamespace = options.readInstallNamespace?.(ghostId);
+        } catch {
+          return reject('installed-namespace-unavailable');
+        }
+        if (
+          installedNamespace !== installation.namespace ||
+          (installation.namespace !== null && installation.namespace !== identity.orgSlug)
+        ) {
+          return reject('market-installation-namespace-mismatch');
+        }
       }
       if (!installation.rawManifestSha256 && !installation.manifestDigest) {
         return reject('market-manifest-identity-missing');

@@ -1,7 +1,11 @@
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import type { GhostManifest } from '../../../shared/ghost.js';
 import {
   ghostManifestDigest,
+  PluginMarketLedger,
   type PluginMarketInstallationRecord,
 } from '../../plugin-market/ledger.js';
 import {
@@ -136,6 +140,68 @@ describe('installed Plugin Connection audience resolver', () => {
         }),
       ).resolve('plugin-a', identity),
     ).toBeNull();
+  });
+
+  it('does not authorize a root twin through an uninstalled root row and a live organization row', () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'cindy-connection-identity-'));
+    try {
+      const ledger = new PluginMarketLedger(path.join(directory, 'ledger.v1.json'));
+      ledger.upsertInstallation({ ...marketInstallation, namespace: null, installed: false });
+      ledger.upsertInstallation({
+        ...marketInstallation,
+        pluginId: 'plugin-market-org',
+        namespace: identity.orgSlug,
+      });
+      const options = {
+        ...resolverOptions(),
+        readMarketInstallation: (id: string) => ledger.lookupInstallationForOidc(id),
+        readInstallNamespace: (id: string) =>
+          id === 'plugin-a' ? null : identity.orgSlug,
+        readApprovedPackageSha256: (id: string) =>
+          id === 'plugin-a' ? 'b'.repeat(64) : marketInstallation.sha256,
+      };
+      expect(ledger.lookupInstallationForOidc('plugin-a')).toMatchObject({
+        kind: 'found',
+        record: { namespace: identity.orgSlug, installed: true },
+      });
+      expect(loadConnectionAudienceResolver(options).resolve('plugin-a', identity)).toBeNull();
+      expect(loadConnectionAudienceResolver({
+        ...options,
+        readInstallNamespace: () => undefined,
+      }).resolve('plugin-a', identity)).toBeNull();
+      expect(loadConnectionAudienceResolver({
+        ...options,
+        readInstallNamespace: () => 'other-org',
+      }).resolve('plugin-a', identity)).toBeNull();
+      expect(loadConnectionAudienceResolver({
+        ...options,
+        readMarketInstallation: () => ({
+          kind: 'found' as const,
+          record: { ...marketInstallation, namespace: 'other-org' },
+        }),
+        readInstallNamespace: () => 'other-org',
+      }).resolve('plugin-a', identity)).toBeNull();
+      expect(loadConnectionAudienceResolver({
+        ...options,
+        readInstallNamespace: () => { throw new Error('receipt unavailable'); },
+      }).resolve('plugin-a', identity)).toBeNull();
+      expect(loadConnectionAudienceResolver({
+        ...options,
+        readMarketInstallation: () => ({
+          kind: 'found' as const,
+          record: { ...marketInstallation, namespace: null },
+        }),
+        readInstallNamespace: () => identity.orgSlug,
+      }).resolve('plugin-a', identity)).toBeNull();
+      expect(loadConnectionAudienceResolver({
+        ...options,
+        readInstallNamespace: () => identity.orgSlug,
+      }).resolve('plugin-a', identity)).toMatchObject({ audience: 'org-example:plugin-a' });
+      expect(loadConnectionAudienceResolver(options).resolve('_ns__org-example__plugin-a', identity))
+        .toMatchObject({ audience: 'org-example:plugin-a' });
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
   });
 
   it('uses raw manifest bytes when the legacy digest is absent', () => {
@@ -543,7 +609,7 @@ describe('installed Plugin Connection audience resolver', () => {
 
   it('resolves a namespaced instance id to the plugin slug audience', () => {
     const readInstalledManifestIdentity = vi.fn((id: string) =>
-      id === '_ns__acme__plugin-a'
+      id === '_ns__org-example__plugin-a'
         ? {
             manifest,
             rawManifestSha256: ghostManifestDigest(manifest),
@@ -553,8 +619,8 @@ describe('installed Plugin Connection audience resolver', () => {
         : null,
     );
     const readMarketInstallation = vi.fn((id: string) =>
-      id === '_ns__acme__plugin-a'
-        ? { kind: 'found' as const, record: { ...marketInstallation, namespace: 'acme' } }
+      id === '_ns__org-example__plugin-a'
+        ? { kind: 'found' as const, record: { ...marketInstallation, namespace: 'org-example' } }
         : { kind: 'absent' as const },
     );
     const readInstallOrigin = vi.fn(() => 'manual' as const);
@@ -562,16 +628,17 @@ describe('installed Plugin Connection audience resolver', () => {
       readInstalledManifestIdentity,
       readMarketInstallation,
       readInstallOrigin,
+      readInstallNamespace: () => 'org-example',
     });
-    expect(resolver.resolve('_ns__acme__plugin-a', identity)).toEqual({
+    expect(resolver.resolve('_ns__org-example__plugin-a', identity)).toEqual({
       membershipId: 'membership-1',
       audience: 'org-example:plugin-a',
       pluginSlug: 'plugin-a',
       allowedHosts: ['service-a.x.test'],
     });
-    expect(readInstalledManifestIdentity).toHaveBeenCalledWith('_ns__acme__plugin-a');
-    expect(readMarketInstallation).toHaveBeenCalledWith('_ns__acme__plugin-a');
-    expect(readInstallOrigin).toHaveBeenCalledWith('_ns__acme__plugin-a');
+    expect(readInstalledManifestIdentity).toHaveBeenCalledWith('_ns__org-example__plugin-a');
+    expect(readMarketInstallation).toHaveBeenCalledWith('_ns__org-example__plugin-a');
+    expect(readInstallOrigin).toHaveBeenCalledWith('_ns__org-example__plugin-a');
   });
 
   it('requires the managed secret target to match a declared exact host', () => {
