@@ -8,7 +8,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
-import { LibraryBindingStore, validateLibraryCandidateLocation, type LibraryBindingDeps } from '../libraryBinding.js';
+import { LibraryBindingStore, assertLibraryMetaOwner, relocateLibraryMetaOwner, validateLibraryCandidateLocation, type LibraryBindingDeps } from '../libraryBinding.js';
 
 const GHOST_ID = 'mivo-canvas';
 
@@ -37,6 +37,23 @@ describe('LibraryBindingStore', () => {
 
   afterEach(async () => {
     await fs.promises.rm(tmp, { recursive: true, force: true });
+  });
+
+  it('moves a library owner exactly once without losing other metadata or reassigning another plugin', async () => {
+    const root = path.join(defaultRootBase, 'hello');
+    const file = path.join(root, '.cindy-library', 'meta.json');
+    await fs.promises.mkdir(path.dirname(file), { recursive: true });
+    await fs.promises.writeFile(file, JSON.stringify({ version: 1, ghostId: 'hello', createdAt: 1, orphaned: { at: 2, name: 'old' } }));
+    await expect(assertLibraryMetaOwner(root, 'other')).rejects.toThrow('different plugin');
+    await expect(assertLibraryMetaOwner(root, 'hello')).resolves.toBeUndefined();
+    expect(await relocateLibraryMetaOwner(root, 'hello', '_ns__acme__hello')).toBe(true);
+    await expect(assertLibraryMetaOwner(root, '_ns__acme__hello')).resolves.toBeUndefined();
+    expect(await relocateLibraryMetaOwner(root, 'hello', '_ns__acme__hello')).toBe(false);
+    expect(JSON.parse(await fs.promises.readFile(file, 'utf8'))).toEqual({
+      version: 1, ghostId: '_ns__acme__hello', createdAt: 1, orphaned: { at: 2, name: 'old' },
+    });
+    await expect(relocateLibraryMetaOwner(root, 'other', 'hello')).rejects.toThrow('different plugin');
+    expect(await relocateLibraryMetaOwner(path.join(defaultRootBase, 'missing'), 'hello', '_ns__acme__hello')).toBe(false);
   });
 
   it('无 binding → 默认根;绑定后解析到 <candidate>/<ghostId>', async () => {
@@ -140,6 +157,23 @@ describe('LibraryBindingStore', () => {
     expect(await store.getBinding('hello')).not.toBeNull();
     await expect(fs.promises.readFile(path.join(fromRoot, 'keep.txt'), 'utf8')).resolves.toBe('org');
     await expect(fs.promises.readFile(path.join(toRoot, 'old.txt'), 'utf8')).resolves.toBe('orphan');
+  });
+
+  it('does not claim an existing destination folder when the source folder is missing', async () => {
+    const store = new LibraryBindingStore(deps);
+    await store.setBinding('hello', candidate);
+    const destination = path.join(await fs.promises.realpath(candidate), '_ns__acme__hello');
+    await fs.promises.mkdir(destination);
+    await fs.promises.writeFile(path.join(destination, 'keep.txt'), 'other');
+    await expect(store.assertCanRelocateBinding('hello', '_ns__acme__hello')).rejects.toThrow(
+      'library custom root destination already exists',
+    );
+    await expect(store.relocateBinding('hello', '_ns__acme__hello')).rejects.toThrow(
+      'library custom root destination already exists',
+    );
+    expect(await store.getBinding('hello')).not.toBeNull();
+    expect(await store.getBinding('_ns__acme__hello')).toBeNull();
+    await expect(fs.promises.readFile(path.join(destination, 'keep.txt'), 'utf8')).resolves.toBe('other');
   });
 
   it('重新绑定 generation 递增;撤销后回落默认', async () => {

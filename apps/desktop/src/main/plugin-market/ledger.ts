@@ -196,7 +196,7 @@ type InstallationsFileRead = {
 function readInstallationsFile(filePath: string): InstallationsFileRead {
   // 读失败与解析失败分开处理:文件不存在(ENOENT)才是空;文件在但读不到(文件锁/
   // 权限/瞬时 I/O)或备份救不回来时由 readAtomicFileSync **上抛**——降级成空会让
-  // 紧接着的写入把真实记录覆盖掉。只有"内容确实不是合法 JSON"才按空重建。
+  // 紧接着的写入把真实记录覆盖掉；损坏的文件也必须留给上层处理。
   const text = readAtomicFileSync(filePath);
   if (text === null) return { kind: 'absent', installations: {}, raw: null };
   let parsed: unknown;
@@ -344,10 +344,8 @@ export class PluginMarketLedger {
 
   read(): PluginMarketLedgerData {
     const { main, custom, namespaced } = this.readFiles();
-    // Collision org rows live only in the sidecar. Treat a corrupt sidecar as a
-    // hard failure so the next rewrite cannot persist installations: {}.
-    if (namespaced.kind === 'invalid') {
-      throw new Error('Plugin namespace ledger is unreadable');
+    if (main.kind === 'invalid' || custom.kind === 'invalid' || namespaced.kind === 'invalid') {
+      throw new Error('Plugin market ledger is unreadable');
     }
     return this.mergeInstallations(main, custom, namespaced);
   }

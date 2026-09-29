@@ -343,6 +343,27 @@ describe('GhostManager namespace migration census', () => {
     }
   });
 
+  it('defers a failed market namespace commit so the offline resident can retry', async () => {
+    await plantLegacyInstall('hello');
+    const deferred = vi.fn();
+    let failStamp = true;
+    manager = new GhostManager({
+      getRootDir: () => rootDir,
+      classifyPendingNamespace: () => ({ kind: 'commit', namespace: 'acme', basis: 'market-organization' }),
+      preparePendingResidentForMigration: async () => true,
+      onPendingResidentMigrationDeferred: deferred,
+      beforeNamespaceCommit: () => {
+        if (failStamp) throw new Error('market ledger unavailable');
+      },
+    });
+    await expect(manager.reconcilePendingRootNamespaces(true)).rejects.toThrow('market ledger unavailable');
+    expect(deferred).toHaveBeenCalledWith('hello');
+    expect(manager.list()[0]?.namespaceMigration).toBe('pending');
+    failStamp = false;
+    await manager.reconcilePendingRootNamespaces(true);
+    expect(manager.list()[0]?.namespace).toBe('acme');
+  });
+
   it('abandons an offline migration if its owner changes during safe stop', async () => {
     await plantLegacyInstall('hello');
     let owner = 'original';

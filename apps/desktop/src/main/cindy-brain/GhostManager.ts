@@ -804,25 +804,32 @@ export class GhostManager {
     const ownerContextKey = this.currentOwnerContextKey();
     for (const ghostId of pendingNamespaceGhostIds(ledger)) {
       if (this.currentOwnerContextKey() !== ownerContextKey) return;
-      if (marketSyncCompleted) {
-        const ready = await this.options.preparePendingResidentForMigration?.(ghostId);
-        if (this.currentOwnerContextKey() !== ownerContextKey) return;
-        if (ready === false) {
-          this.options.onPendingResidentMigrationDeferred?.(ghostId);
-          continue;
+      try {
+        if (marketSyncCompleted) {
+          const ready = await this.options.preparePendingResidentForMigration?.(ghostId);
+          if (this.currentOwnerContextKey() !== ownerContextKey) return;
+          if (ready === false) {
+            this.options.onPendingResidentMigrationDeferred?.(ghostId);
+            continue;
+          }
         }
-      }
-      const classification = this.options.classifyPendingNamespace?.(ghostId, marketSyncCompleted) ?? {
-        kind: 'pending' as const,
-        reason: 'awaiting-market-facts',
-      };
-      if (classification.kind === 'commit') {
-        const result = await this.commitPendingNamespace(
-          ghostId, classification.namespace, classification.basis,
-        );
-        if (!result.ok && result.reason === 'busy' && marketSyncCompleted) {
+        const classification = this.options.classifyPendingNamespace?.(ghostId, marketSyncCompleted) ?? {
+          kind: 'pending' as const,
+          reason: 'awaiting-market-facts',
+        };
+        if (classification.kind === 'commit') {
+          const result = await this.commitPendingNamespace(
+            ghostId, classification.namespace, classification.basis,
+          );
+          if (!result.ok && result.reason === 'busy' && marketSyncCompleted) {
+            this.options.onPendingResidentMigrationDeferred?.(ghostId);
+          }
+        }
+      } catch (error) {
+        if (marketSyncCompleted && this.currentOwnerContextKey() === ownerContextKey) {
           this.options.onPendingResidentMigrationDeferred?.(ghostId);
         }
+        throw error;
       }
     }
   }

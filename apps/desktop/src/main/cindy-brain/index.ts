@@ -372,7 +372,7 @@ import { ghostBrokerRedirectPortInstallError } from './ghostBrokerRedirectPort.j
 import { ConnectionTokenProvider, type IssuedConnectionToken } from './connectionTokenProvider.js';
 import { GhostFsSlot } from './fsSlot.js';
 import { GhostLibrarySlot } from './librarySlot.js';
-import { LibraryBindingStore, validateLibraryCandidateLocation } from './libraryBinding.js';
+import { LibraryBindingStore, assertLibraryMetaOwner, relocateLibraryMetaOwner, validateLibraryCandidateLocation } from './libraryBinding.js';
 import { LibraryVault, statfsFreeBytes, DEFAULT_LIBRARY_LIMITS } from './libraryVault.js';
 import { LibraryStagingStore } from './libraryStaging.js';
 import { LibrarySqlService, defaultLibraryDbWorkerPath } from './librarySqlService.js';
@@ -1424,6 +1424,7 @@ async function relocateGhostUserData(fromPart: string, toPart: string): Promise<
   let rollbackSecrets: (() => void) | null = null;
   let bindingMoved = false;
   let rollbackWorkdir: (() => Promise<void>) | null = null;
+  let renamedLibraryMeta: string | null = null;
   try {
     for (const move of planned) {
       relocateOwnedPath(move.from, move.to);
@@ -1432,9 +1433,21 @@ async function relocateGhostUserData(fromPart: string, toPart: string): Promise<
     rollbackSecrets = migrateGhostSecrets(fromPart, toPart);
     await getGhostLibraryBindingStore().relocateBinding(fromPart, toPart);
     bindingMoved = true;
+    const customBinding = await getGhostLibraryBindingStore().getBinding(toPart);
+    const libraryRoot = customBinding
+      ? path.join(customBinding.root, toPart)
+      : ownerScopedUserDataPath('libraries', toPart);
+    if (await relocateLibraryMetaOwner(libraryRoot, fromPart, toPart)) renamedLibraryMeta = libraryRoot;
     rollbackWorkdir = await relocateGhostWorkdirPrefs(fromPart, toPart);
     await ledger.relocateGhostMediaRefs(fromPart, toPart);
   } catch (error) {
+    if (renamedLibraryMeta) {
+      try {
+        await relocateLibraryMetaOwner(renamedLibraryMeta, toPart, fromPart);
+      } catch (rollbackError) {
+        void rollbackError;
+      }
+    }
     if (rollbackWorkdir) {
       try {
         await rollbackWorkdir();
@@ -1770,6 +1783,7 @@ export function getGhostManager(): GhostManager {
         const retryTimer = pendingResidentMigrationRetryTimers.get(ghostId);
         if (retryTimer) clearTimeout(retryTimer);
         pendingResidentMigrationRetryTimers.delete(ghostId);
+        pendingResidentMigrationRetryAttempts.delete(ghostId);
         const ownerKey = activeOwnerScopeKey();
         queueMicrotask(() => {
           if (activeOwnerScopeKey() !== ownerKey) return;
@@ -3002,12 +3016,14 @@ function getPluginMarketLedger(): PluginMarketLedger {
 let offlineResidentScopeKey: string | null = null;
 const offlineResidentIds = new Set<string>();
 const pendingResidentMigrationRetryTimers = new Map<string, NodeJS.Timeout>();
+const pendingResidentMigrationRetryAttempts = new Map<string, number>();
 
 function offlineResidentIdsForActiveScope(): Set<string> {
   const scopeKey = activeOwnerScopeKey();
   if (offlineResidentScopeKey !== scopeKey) {
     for (const timer of pendingResidentMigrationRetryTimers.values()) clearTimeout(timer);
     pendingResidentMigrationRetryTimers.clear();
+    pendingResidentMigrationRetryAttempts.clear();
     offlineResidentIds.clear();
     offlineResidentScopeKey = scopeKey;
   }
@@ -3018,6 +3034,8 @@ function schedulePendingResidentMigrationRetry(ghostId: string): void {
   if (!offlineResidentIdsForActiveScope().has(ghostId) ||
       pendingResidentMigrationRetryTimers.has(ghostId)) return;
   const ownerScopeKey = activeOwnerScopeKey();
+  const attempts = pendingResidentMigrationRetryAttempts.get(ghostId) ?? 0;
+  pendingResidentMigrationRetryAttempts.set(ghostId, attempts + 1);
   const timer = setTimeout(() => {
     if (pendingResidentMigrationRetryTimers.get(ghostId) !== timer) return;
     pendingResidentMigrationRetryTimers.delete(ghostId);
@@ -3028,8 +3046,9 @@ function schedulePendingResidentMigrationRetry(ghostId: string): void {
         ghostId,
         error: error instanceof Error ? error.message : String(error),
       });
+      schedulePendingResidentMigrationRetry(ghostId);
     });
-  }, 1000);
+  }, Math.min(1000 * 2 ** Math.min(attempts, 6), 60_000));
   timer.unref();
   pendingResidentMigrationRetryTimers.set(ghostId, timer);
 }
@@ -6059,6 +6078,11 @@ async function relocateGhostLibraryTo(
       await refreshMivoLibraryExtraDirGrant();
       return set.ok ? { ok: true } : { ok: false, message: set.message };
     }
+    try {
+      await assertLibraryMetaOwner(fromRoot, id);
+    } catch {
+      return { ok: false, message: 'Library 归属无法确认，请先恢复原位置' };
+    }
     const result = await migrateGhostLibrary({
       ghostId: id,
       fromRoot,
@@ -6149,7 +6173,9 @@ export async function getGhostLibraryOverview(ghostId: string): Promise<GhostLib
         await fs.promises.readFile(path.join(root, '.cindy-library', 'meta.json'), 'utf8'),
       ) as {
         orphaned?: unknown;
+        ghostId?: unknown;
       };
+      if (meta?.ghostId !== storagePart) throw new Error('Library owner mismatch');
       orphaned = meta.orphaned !== undefined;
       try {
         const usage = JSON.parse(
@@ -6163,8 +6189,11 @@ export async function getGhostLibraryOverview(ghostId: string): Promise<GhostLib
       } catch {
         /* 账本缺失按 0 计;设置页可触发重扫 */
       }
-    } catch {
-      /* 尚未创建过 Library = 全零;不是错误 */
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT' || fs.existsSync(root)) {
+        state = 'unavailable';
+        reason = 'corrupt';
+      }
     }
   }
   let diskFreeBytes: number | null = null;
@@ -6207,9 +6236,14 @@ export async function deleteGhostLibraryForActiveOwner(
       // 引导恢复位置,不误删)。
       resolveLibraryRoot: async (id) => {
         const resolution = await getGhostLibraryBindingStore().resolveLibraryRoot(id);
-        return resolution.kind === 'custom'
-          ? resolution.root
-          : ownerScopedUserDataPath('libraries', id);
+        const root = resolution.kind === 'custom' ? resolution.root : ownerScopedUserDataPath('libraries', id);
+        if (!root) return null;
+        try {
+          await assertLibraryMetaOwner(root, id);
+          return root;
+        } catch {
+          return null;
+        }
       },
       trashRoot: () => ownerScopedUserDataPath('libraries-trash'),
       removeBinding: async (id) => {

@@ -234,16 +234,12 @@ describe('PluginMarketLedger', () => {
     });
   });
 
-  it('fails closed to an empty ledger for malformed or future data', () => {
+  it('refuses to rewrite a future ledger version', () => {
     const { filePath, ledger } = harness();
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
     fs.writeFileSync(filePath, '{"schemaVersion":99,"installations":{"x":{}}}');
 
-    expect(ledger.read()).toEqual({
-      schemaVersion: 1,
-      installations: {},
-      defaultInstallOptOuts: {},
-    });
+    expect(() => ledger.read()).toThrow(/market ledger is unreadable/i);
     expect(ledger.lookupInstallationForOidc('cindy-test')).toEqual({ kind: 'invalid' });
   });
 
@@ -275,7 +271,7 @@ describe('PluginMarketLedger', () => {
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
     fs.writeFileSync(filePath, '{not-json');
 
-    expect(ledger.installationForGhost('cindy-test')).toBeNull();
+    expect(() => ledger.installationForGhost('cindy-test')).toThrow(/market ledger is unreadable/i);
     expect(ledger.lookupInstallationForOidc('cindy-test')).toEqual({ kind: 'invalid' });
   });
 
@@ -284,7 +280,7 @@ describe('PluginMarketLedger', () => {
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
     fs.writeFileSync(filePath, JSON.stringify({ schemaVersion: 1, installations: null }));
 
-    expect(ledger.installationForGhost('cindy-test')).toBeNull();
+    expect(() => ledger.installationForGhost('cindy-test')).toThrow(/market ledger is unreadable/i);
     expect(ledger.lookupInstallationForOidc('cindy-test')).toEqual({ kind: 'invalid' });
   });
 
@@ -632,10 +628,10 @@ describe('PluginMarketLedger', () => {
     const nsPath = path.join(path.dirname(filePath), NS_LEDGER_FILE);
     const before = fs.readFileSync(nsPath, "utf8");
     fs.writeFileSync(nsPath, "{not-json");
-    expect(() => ledger.read()).toThrow(/namespace ledger is unreadable/i);
+    expect(() => ledger.read()).toThrow(/market ledger is unreadable/i);
     expect(() =>
       ledger.upsertInstallation(record({ ghostId: "other", pluginId: `c${"c".repeat(24)}` })),
-    ).toThrow(/namespace ledger is unreadable/i);
+    ).toThrow(/market ledger is unreadable/i);
     expect(fs.readFileSync(nsPath, "utf8")).toBe("{not-json");
     expect(ledger.lookupInstallationForOidc("helper")).toEqual({ kind: "invalid" });
     fs.writeFileSync(nsPath, before);
@@ -644,5 +640,18 @@ describe('PluginMarketLedger', () => {
       pluginId: `c${"b".repeat(24)}`,
     });
   });
+
+  it.each(['ledger.v1.json', 'custom-ledger.v1.json'])(
+    'does not overwrite a damaged %s during a later installation',
+    (name) => {
+      const { filePath, ledger } = harness();
+      ledger.upsertInstallation(record({ ghostId: 'kept' }));
+      const damagedPath = path.join(path.dirname(filePath), name);
+      fs.writeFileSync(damagedPath, '{corrupt');
+      expect(() => ledger.upsertInstallation(record({ ghostId: 'new' }))).toThrow(/market ledger is unreadable/i);
+      expect(fs.readFileSync(damagedPath, 'utf8')).toBe('{corrupt');
+      expect(ledger.lookupInstallationForOidc('kept')).toEqual({ kind: 'invalid' });
+    },
+  );
 
 });

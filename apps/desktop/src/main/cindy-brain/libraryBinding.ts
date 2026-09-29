@@ -47,6 +47,51 @@ export interface LibraryBindingFileData {
   bindings: Record<string, LibraryBindingRecord>;
 }
 
+async function readLibraryMeta(root: string): Promise<Record<string, unknown> | null> {
+  const file = path.join(root, '.cindy-library', 'meta.json');
+  let raw: string;
+  try {
+    raw = await fs.promises.readFile(file, 'utf8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT' && !fs.existsSync(root)) return null;
+    throw error;
+  }
+  const meta: unknown = JSON.parse(raw);
+  if (!meta || typeof meta !== 'object' || Array.isArray(meta) ||
+      (meta as { version?: unknown }).version !== 1 ||
+      typeof (meta as { createdAt?: unknown }).createdAt !== 'number' ||
+      typeof (meta as { ghostId?: unknown }).ghostId !== 'string') {
+    throw new Error('library meta is invalid');
+  }
+  return meta as Record<string, unknown>;
+}
+
+export async function assertLibraryMetaOwner(root: string, ownerId: string): Promise<void> {
+  if (!isValidPluginStoragePart(ownerId)) throw new Error('library owner id is invalid');
+  const meta = await readLibraryMeta(root);
+  if (meta && meta.ghostId !== ownerId) throw new Error('library meta belongs to a different plugin');
+}
+
+export async function relocateLibraryMetaOwner(root: string, fromId: string, toId: string): Promise<boolean> {
+  if (!isValidPluginStoragePart(fromId) || !isValidPluginStoragePart(toId)) {
+    throw new Error('library meta relocate ids are invalid');
+  }
+  const meta = await readLibraryMeta(root);
+  if (!meta) return false;
+  const owner = meta.ghostId;
+  if (owner === toId) return false;
+  if (owner !== fromId) throw new Error('library meta belongs to a different plugin');
+  const file = path.join(root, '.cindy-library', 'meta.json');
+  const temporary = file + '.' + randomUUID() + '.tmp';
+  try {
+    await fs.promises.writeFile(temporary, JSON.stringify({ ...meta, ghostId: toId }), { flag: 'wx', mode: 0o600 });
+    await fs.promises.rename(temporary, file);
+  } finally {
+    await fs.promises.rm(temporary, { force: true });
+  }
+  return true;
+}
+
 export type LibraryLocationResolution =
   | { kind: 'default'; root: string }
   | { kind: 'custom'; root: string; record: LibraryBindingRecord }
@@ -301,9 +346,8 @@ export class LibraryBindingStore {
     if (data.bindings[toGhostId]) {
       throw new Error(`library binding destination already exists: ${toGhostId}`);
     }
-    const fromRoot = path.join(record.root, fromGhostId);
     const toRoot = path.join(record.root, toGhostId);
-    if (fs.existsSync(fromRoot) && fs.existsSync(toRoot)) {
+    if (fs.existsSync(toRoot)) {
       throw new Error(`library custom root destination already exists: ${toRoot}`);
     }
   }
@@ -323,7 +367,7 @@ export class LibraryBindingStore {
       }
       const fromRoot = path.join(record.root, fromGhostId);
       const toRoot = path.join(record.root, toGhostId);
-      if (fs.existsSync(fromRoot) && fs.existsSync(toRoot)) {
+      if (fs.existsSync(toRoot)) {
         throw new Error(`library custom root destination already exists: ${toRoot}`);
       }
       let folderMoved = false;
