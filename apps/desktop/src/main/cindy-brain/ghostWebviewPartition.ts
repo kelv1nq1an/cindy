@@ -1,5 +1,5 @@
 import { GHOST_PARTITION_PREFIX, parseGhostPartition } from '../../shared/ghost.js';
-import { isValidPluginStoragePart } from '../../shared/pluginIdentity.js';
+import { installedGhostLogicalIdentity, isValidPluginStoragePart, pluginStoragePart } from '../../shared/pluginIdentity.js';
 import { dataOwnerStorageKey, type ActiveAppSession } from '../appSessionState.js';
 
 const GHOST_OWNER_PARTITION_PREFIX = `${GHOST_PARTITION_PREFIX}owner:`;
@@ -13,9 +13,21 @@ export interface ResolvedGhostWebviewPartition {
 export function ownerScopedGhostPartition(
   ghostId: string,
   owner: Pick<ActiveAppSession, 'mode' | 'dataOwnerId'>,
+  knownRoot = false,
 ): string | null {
   if (!isValidPluginStoragePart(ghostId) || owner.mode === 'signed-out' || !owner.dataOwnerId) return null;
-  return `${GHOST_OWNER_PARTITION_PREFIX}${owner.mode}:${dataOwnerStorageKey(owner.dataOwnerId)}:${ghostId}`;
+  return `${GHOST_OWNER_PARTITION_PREFIX}${owner.mode}:${dataOwnerStorageKey(owner.dataOwnerId)}:${ghostId}${knownRoot ? ':root' : ''}`;
+}
+
+export function ownerScopedGhostPartitionForInstalledGhost(
+  ghost: { manifest: { id: string }; namespace?: string | null },
+  owner: Pick<ActiveAppSession, 'mode' | 'dataOwnerId'>,
+): string | null {
+  return ownerScopedGhostPartition(
+    pluginStoragePart(installedGhostLogicalIdentity(ghost)),
+    owner,
+    ghost.namespace === null,
+  );
 }
 
 /**

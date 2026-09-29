@@ -7,7 +7,7 @@ import type { WebviewTag } from 'electron';
 import { useAuth } from '@/contexts/AuthContext';
 import { cn } from '@/lib/utils';
 import { GHOST_SCHEME, ghostPartition, type InstalledGhost } from '../../shared/ghost';
-import { installedGhostStoragePart } from '../../shared/pluginIdentity';
+import { installedGhostLogicalIdentity, pluginStoragePart } from '../../shared/pluginIdentity';
 import {
   buildGhostPluginSettingsThemeCss,
   buildGhostSettingsThemeCss,
@@ -144,7 +144,7 @@ function SettingsWebviewBody({
   const [generation, setGeneration] = useState(0);
   const hostRef = useRef<HTMLDivElement | null>(null);
   const { manifest } = ghost;
-  const partitionClaim = ghostPartition(installedGhostStoragePart(ghost));
+  const partitionClaim = ghostPartition(pluginStoragePart(installedGhostLogicalIdentity(ghost)));
   const settingsHtml = manifest.settingsHtml;
   const fixedHeight = manifest.settingsHeight;
   const buildSettingsThemeCss =

@@ -174,6 +174,7 @@ import { GhostRuntime } from './runtime/GhostRuntime.js';
 import {
   electronSandboxAdapter,
   ensureGhostProtocolRegistered,
+  revokeLegacyGhostProtocolPartition,
   ghostIdForLogicWebContents,
   sendToGhostLogic,
   setGhostAppContextProvider,
@@ -417,7 +418,7 @@ import {
 import { GhostExternalLinkGate, GhostPreviewGate, resolveGhostPanelMedia } from './previewGate.js';
 import { runGhostExternalLinkNavigation } from './ghostExternalLinkNavigation.js';
 import { runGhostPreviewNavigation } from './ghostPreviewNavigation.js';
-import { resolveGhostWebviewPartitionClaim } from './ghostWebviewPartition.js';
+import { ownerScopedGhostPartitionForInstalledGhost, resolveGhostWebviewPartitionClaim } from './ghostWebviewPartition.js';
 import {
   ghostSecretSaved,
   readGhostSecret,
@@ -1781,6 +1782,7 @@ export function getGhostManager(): GhostManager {
         }
       },
       onNamespaceCommitted: (ghostId, namespace) => {
+        revokeLegacyGhostProtocolPartition(ghostId);
         offlineResidentIdsForActiveScope().delete(ghostId);
         const retryTimer = pendingResidentMigrationRetryTimers.get(ghostId);
         if (retryTimer) clearTimeout(retryTimer);
@@ -7188,7 +7190,7 @@ async function uninstallGhostAndCleanupLocked(
     // 卸载是用户明确动作,失败只记日志:包已经收走了,不能因为清账失败把
     // 卸载报成失败(与上面 ghost-fs / kv 清理同纪律)。
     try {
-      const removed = await ledger.removeRefs({ refKind: 'ghost-deposit', refId: id });
+      const removed = await ledger.removeRefs({ refKind: 'ghost-deposit', refId: storagePart });
       if (removed > 0) log.info('ghost deposit media refs removed', { id, removed });
     } catch (err) {
       log.warn('ghost deposit media refs 清理失败', {
@@ -7198,7 +7200,7 @@ async function uninstallGhostAndCleanupLocked(
     }
     let recentIds: string[] | null = null;
     try {
-      recentIds = forgetGhostRecentUsage(id);
+      recentIds = forgetGhostRecentUsage(storagePart);
     } catch (error) {
       log.warn('ghost recent usage 清理失败', {
         id,
@@ -7206,14 +7208,14 @@ async function uninstallGhostAndCleanupLocked(
       });
     }
     try {
-      forgetGhostRecommendations(id);
+      forgetGhostRecommendations(storagePart);
     } catch {
       log.warn('ghost recommendation cleanup unavailable', { id });
     }
     // 未读随意识一起走:包都没了还留一颗点,用户既点不开也清不掉。
     // 限速记账一并抹掉,重装后的第一条不该被上一世的时刻挡住。
-    extinguishGhostUnread(id);
-    badgeSlotSingleton?.forget(id);
+    extinguishGhostUnread(storagePart);
+    badgeSlotSingleton?.forget(storagePart);
     // 卸载刚落地,manager.list() 就是当下的全部事实(哪怕是空表)——标权威,
     // 好让「卸掉最后一个插件」也能把账本里的孤儿记录一并清掉。
     broadcastGhostsChanged(manager.list(), true);
@@ -7299,21 +7301,21 @@ export function registerGhostIpc(): void {
   setGhostSandboxDevToolsDisabled(app.isPackaged);
   setGhostAppContextProvider(currentGhostAppContext);
   setGhostMediaModelsProvider(getGhostConfigurableMediaModels);
-  setGhostAgentModelsProvider(async (ghostId) => {
+  setGhostAgentModelsProvider(async (instanceId) => {
     const owner = activeOwnerScopeKey();
-    if (!findAvailableGhost(ghostId)?.enabled) {
+    if (!findGhostForInstanceId(instanceId)?.enabled) {
       return { ok: false, errorCode: 'NOT_AVAILABLE', message: 'Plugin unavailable' };
     }
     const views = await getDesktopProviderService({ allowSideEffects: false }).listProviders({ allowSideEffects: false, snapshotOnly: true });
-    if (owner !== activeOwnerScopeKey() || !findAvailableGhost(ghostId)?.enabled) {
+    if (owner !== activeOwnerScopeKey() || !findGhostForInstanceId(instanceId)?.enabled) {
       return { ok: false, errorCode: 'NOT_AVAILABLE', message: 'Plugin unavailable' };
     }
     await waitForModelVisibilityMirror();
-    if (owner !== activeOwnerScopeKey() || !findAvailableGhost(ghostId)?.enabled) return { ok: false, errorCode: 'NOT_AVAILABLE', message: 'Plugin unavailable' };
+    if (owner !== activeOwnerScopeKey() || !findGhostForInstanceId(instanceId)?.enabled) return { ok: false, errorCode: 'NOT_AVAILABLE', message: 'Plugin unavailable' };
     // Do not initialize runtimes as a side effect of a plugin's read-only GET.
     const { getMakerIfReady } = await import('../maker-host/index.js');
     const maker = getMakerIfReady();
-    if (owner !== activeOwnerScopeKey() || !findAvailableGhost(ghostId)?.enabled || !maker) {
+    if (owner !== activeOwnerScopeKey() || !findGhostForInstanceId(instanceId)?.enabled || !maker) {
       return { ok: false, errorCode: 'NOT_AVAILABLE', message: 'Model runtimes unavailable' };
     }
     return projectGhostAgentModels(views, maker.listAvailableAgents(), getModelVisibilityOverride);
@@ -9153,11 +9155,12 @@ export function resolveGhostWebviewAttach(
   const owner = getActiveAppSession();
   const resolvedPartition = resolveGhostWebviewPartitionClaim(partitionClaim, owner);
   if (!resolvedPartition) return null;
-  // Partition ids are physical storage parts. In-place migrated org plugins keep
-  // `xd-feishu` on disk after namespace is stamped; logical identity lookup would miss them.
   if (!parsePluginStoragePart(resolvedPartition.ghostId)) return null;
   const ghost = findGhostForInstanceId(resolvedPartition.ghostId);
   if (!ghost || !ghost.enabled) return null;
+  if (resolvedPartition.ghostId !== pluginStoragePart(installedGhostLogicalIdentity(ghost))) return null;
+  const partition = ownerScopedGhostPartitionForInstalledGhost(ghost, owner);
+  if (!partition) return null;
   const allowedPaths = ghostWebviewEntryPaths(ghost.manifest);
   if (allowedPaths.length === 0) return null;
   let url: URL;
@@ -9171,7 +9174,7 @@ export function resolveGhostWebviewAttach(
   ensureGhostProtocolRegistered(ghost, owner);
   return {
     ghost,
-    partition: resolvedPartition.partition,
+    partition,
     owner: { mode: owner.mode, dataOwnerId: owner.dataOwnerId! },
   };
 }

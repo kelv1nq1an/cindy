@@ -7,6 +7,7 @@ vi.mock('../../appSessionState', () => ({
 import { ghostPartition } from '../../../shared/ghost';
 import {
   ownerScopedGhostPartition,
+  ownerScopedGhostPartitionForInstalledGhost,
   resolveGhostWebviewPartitionClaim,
 } from '../ghostWebviewPartition';
 
@@ -61,5 +62,17 @@ describe('ghost WebView Main partition', () => {
       partition: 'cindy-ghost-owner:cloud:opaque-owner-a:_ns__acme__helper',
     });
     expect(ownerScopedGhostPartition('_ns/acme/helper', ownerA)).toBeNull();
+  });
+
+  it('迁移前的旧 root、原位企业实例与新 root 各自使用不同的会话', () => {
+    const legacy = { manifest: { id: 'helper' } };
+    const organization = { manifest: { id: 'helper' }, namespace: 'acme' };
+    const root = { manifest: { id: 'helper' }, namespace: null };
+    expect(ownerScopedGhostPartitionForInstalledGhost(legacy, ownerA))
+      .toBe('cindy-ghost-owner:cloud:opaque-owner-a:helper');
+    expect(ownerScopedGhostPartitionForInstalledGhost(organization, ownerA))
+      .toBe('cindy-ghost-owner:cloud:opaque-owner-a:_ns__acme__helper');
+    expect(ownerScopedGhostPartitionForInstalledGhost(root, ownerA))
+      .toBe('cindy-ghost-owner:cloud:opaque-owner-a:helper:root');
   });
 });

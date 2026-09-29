@@ -106,6 +106,7 @@ import type {
 import {
   electronSandboxAdapter,
   ensureGhostProtocolRegistered,
+  revokeLegacyGhostProtocolPartition,
   setGhostAppContextProvider,
   setGhostAgentModelsProvider,
   setGhostKvStore,
@@ -141,6 +142,36 @@ beforeEach(() => {
 });
 
 describe('electronSandboxAdapter owner partition', () => {
+  it('separates an in-place organization WebView session from a later root install', () => {
+    const organization = { ...ghost('shared'), namespace: 'acme' };
+    ensureGhostProtocolRegistered(organization);
+    expect(harness.sessions.has('cindy-ghost-owner:cloud:opaque-owner-a:_ns__acme__shared')).toBe(true);
+    expect(harness.sessions.has('cindy-ghost-owner:cloud:opaque-owner-a:shared')).toBe(false);
+    ensureGhostProtocolRegistered({ ...ghost('shared'), namespace: null });
+    expect(harness.sessions.size).toBe(2);
+  });
+
+  it('does not reuse a legacy root session after an organization stamp and root replacement', () => {
+    ensureGhostProtocolRegistered(ghost('legacy-shared'));
+    ensureGhostProtocolRegistered({ ...ghost('legacy-shared'), namespace: 'acme' });
+    ensureGhostProtocolRegistered({ ...ghost('legacy-shared'), namespace: null });
+    expect([...harness.sessions.keys()]).toEqual([
+      'cindy-ghost-owner:cloud:opaque-owner-a:legacy-shared',
+      'cindy-ghost-owner:cloud:opaque-owner-a:_ns__acme__legacy-shared',
+      'cindy-ghost-owner:cloud:opaque-owner-a:legacy-shared:root',
+    ]);
+  });
+
+  it('refuses new protocol requests from a legacy WebView after namespace commit', async () => {
+    ensureGhostProtocolRegistered(ghost('committed-legacy'));
+    const oldHandler = harness.sessions.get('cindy-ghost-owner:cloud:opaque-owner-a:committed-legacy')?.protocolHandler;
+    revokeLegacyGhostProtocolPartition('committed-legacy');
+    expect((await oldHandler?.(new Request('cindy-ghost://committed-legacy/kv')))?.status).toBe(403);
+    expect(kvEndpoint.handleGhostKvRequest).not.toHaveBeenCalled();
+    ensureGhostProtocolRegistered({ ...ghost('committed-legacy'), namespace: null });
+    const rootHandler = harness.sessions.get('cindy-ghost-owner:cloud:opaque-owner-a:committed-legacy:root')?.protocolHandler;
+    expect((await rootHandler?.(new Request('cindy-ghost://committed-legacy/')))?.status).toBe(200);
+  });
   it('同 ghostId 的不同 owner 使用不同的非持久 session，并显式拒绝权限和下载', () => {
     const installed = ghost('same-ghost');
     ensureGhostProtocolRegistered(installed, {
@@ -398,6 +429,14 @@ describe('electronSandboxAdapter owner partition', () => {
 });
 
 describe('read-only agent model directory', () => {
+  it('identifies the organization instance when a root plugin has the same id', async () => {
+    const provider = vi.fn().mockResolvedValue({ ok: true, models: [] });
+    setGhostAgentModelsProvider(provider);
+    ensureGhostProtocolRegistered({ ...ghost('shared-models'), namespace: 'acme', dir: '/plugins/_ns/acme/shared-models' });
+    const handler = harness.sessions.get('cindy-ghost-owner:cloud:opaque-owner-a:_ns__acme__shared-models')?.protocolHandler;
+    expect((await handler?.(new Request('cindy-ghost://shared-models/agent-models')))?.status).toBe(200);
+    expect(provider).toHaveBeenCalledWith('_ns__acme__shared-models');
+  });
   it('serves no-store metadata without accepting writes or query overrides', async () => {
     const provider = vi.fn().mockResolvedValue({ ok: true, models: [] });
     setGhostAgentModelsProvider(provider);

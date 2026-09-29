@@ -15,7 +15,7 @@ import {
   type InstalledGhost,
 } from '../../../shared/ghost.js';
 import { getActiveAppSession, type ActiveAppSession } from '../../appSessionState.js';
-import { ownerScopedGhostPartition } from '../ghostWebviewPartition.js';
+import { ownerScopedGhostPartition, ownerScopedGhostPartitionForInstalledGhost } from '../ghostWebviewPartition.js';
 import { installedGhostStoragePart } from '../../../shared/pluginIdentity.js';
 import { GHOST_BOOT_PATH, ghostBootHtml, ghostFileMime, resolveGhostFilePath } from './ghostFiles.js';
 import { handleGhostKvRequest, readBoundedBodyText } from './ghostKvEndpoint.js';
@@ -233,6 +233,7 @@ export function setGhostConnectionsHandler(handler: GhostConnectionsProtocolHand
 
 /** 该分区是否已挂过协议 handler(session 分区随 app 生命周期,挂一次即可)。 */
 const partitionRegistered = new Set<string>();
+const revokedPartitions = new Set<string>();
 const partitionGhost = new Map<string, { dir: string; entry: string }>();
 type GhostProtocolOwnerIdentity = Pick<ActiveAppSession, 'mode' | 'dataOwnerId'>;
 const partitionOwner = new Map<string, GhostProtocolOwnerIdentity>();
@@ -261,9 +262,14 @@ export function ensureGhostProtocolRegistered(
   ghost: InstalledGhost,
   owner: ActiveAppSession = getActiveAppSession(),
 ): void {
-  const partition = ownerScopedGhostPartition(installedGhostStoragePart(ghost), owner);
+  const partition = ownerScopedGhostPartitionForInstalledGhost(ghost, owner);
   if (!partition) throw new Error('ghost protocol requires an active data owner');
   registerGhostProtocol(partition, ghost, ghostProtocolOwnerSnapshot(owner));
+}
+
+export function revokeLegacyGhostProtocolPartition(ghostId: string): void {
+  const partition = ownerScopedGhostPartition(ghostId, getActiveAppSession());
+  if (partition) revokedPartitions.add(partition);
 }
 
 /**
@@ -320,7 +326,7 @@ function registerGhostProtocol(
       // owner B 提交后，owner A 的旧 guest 仍可能短暂存活并新发请求。
       // 在 URL 路由、body 读取和任何 provider 调用前拒绝旧 Session；已经
       // 进入 handler 的请求不在这里取消或排空。
-      if (!isGhostProtocolOwnerActive(owner)) {
+      if (revokedPartitions.has(partition) || !isGhostProtocolOwnerActive(owner)) {
         return new Response(null, {
           status: 403,
           headers: { 'Cache-Control': 'no-store' },
@@ -379,7 +385,7 @@ function registerGhostProtocol(
         if (url.search) return new Response(null, { status: 400, headers });
         if (!ghostAgentModelsProvider) return new Response(null, { status: 503, headers });
         try {
-          const result = await ghostAgentModelsProvider(ghostId);
+          const result = await ghostAgentModelsProvider(storagePart);
           if (!isGhostProtocolOwnerActive(owner)) return new Response(null, { status: 403, headers });
           return new Response(JSON.stringify(result), {
             status: result.ok ? 200 : result.errorCode === 'PERMISSION_DENIED' ? 403 : 503,
@@ -700,7 +706,7 @@ class ElectronSandboxHandle implements SandboxHandle {
 
   constructor(private readonly ghost: InstalledGhost) {
     const activeOwner = getActiveAppSession();
-    const partition = ownerScopedGhostPartition(installedGhostStoragePart(ghost), activeOwner);
+    const partition = ownerScopedGhostPartitionForInstalledGhost(ghost, activeOwner);
     if (!partition) throw new Error('ghost sandbox requires an active data owner');
     registerGhostProtocol(partition, ghost, ghostProtocolOwnerSnapshot(activeOwner));
     this.win = new BrowserWindow({

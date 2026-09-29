@@ -1164,6 +1164,72 @@ describe('PluginMarketService migration and defaultInstall', () => {
     expect(runtime.install).not.toHaveBeenCalled();
   });
 
+  it('recovers a disconnected namespaced install beside a same-id public catalog entry', async () => {
+    const publicItem = summary({ ghostId: 'helper', namespace: null });
+    const orgItem = summary({
+      id: `c${'d'.repeat(24)}`,
+      ghostId: 'helper', namespace: 'acme', scope: 'organization', organizationId: 'org-1',
+      currentRelease: { ...summary().currentRelease, id: RELEASE_ID },
+    });
+    const canonicalManifest = normalizedManifest(manifest('helper'));
+    const installRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cindy-market-namespace-recovery-'));
+    roots.push(installRoot);
+    const orgDir = path.join(installRoot, '_ns', 'acme', 'helper');
+    fs.mkdirSync(orgDir, { recursive: true });
+    fs.writeFileSync(path.join(orgDir, 'ghost.json'), JSON.stringify(canonicalManifest));
+    runtime.ghosts = [{ manifest: canonicalManifest as unknown as Record<string, unknown>,
+      dir: orgDir, namespace: 'acme', enabled: true }];
+    runtime.approvedInstallEvidence.mockReturnValue({
+      packageSha256: orgItem.currentRelease.sha256,
+      approvedManifest: canonicalManifest,
+      legacyMigrated: false,
+    });
+    const h = harness([publicItem, orgItem]);
+    const record = recordForTest(orgItem, {
+      namespace: 'acme', manifestDigest: ghostManifestDigest(canonicalManifest),
+    });
+    h.ledger.upsertInstallation(record);
+    h.ledger.markRemovedRecord(record, 'user-1');
+
+    const snapshot = await h.service.snapshot();
+
+    expect(h.ledger.installationForIdentity({ namespace: 'acme', ghostId: 'helper' }))
+      .toMatchObject({ installed: true, pluginId: orgItem.id });
+    expect(snapshot.items.find((item) => item.pluginId === orgItem.id)?.installState).toBe('installed');
+    expect(h.api.download).not.toHaveBeenCalled();
+  });
+
+  it('does not reconnect a namespaced install to a same-id catalog entry from another namespace', async () => {
+    const canonicalManifest = normalizedManifest(manifest('helper'));
+    const installRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cindy-market-namespace-drift-'));
+    roots.push(installRoot);
+    const orgDir = path.join(installRoot, '_ns', 'acme', 'helper');
+    fs.mkdirSync(orgDir, { recursive: true });
+    fs.writeFileSync(path.join(orgDir, 'ghost.json'), JSON.stringify(canonicalManifest));
+    runtime.ghosts = [{ manifest: canonicalManifest as unknown as Record<string, unknown>,
+      dir: orgDir, namespace: 'acme', enabled: true }];
+    runtime.approvedInstallEvidence.mockReturnValue({
+      packageSha256: summary().currentRelease.sha256,
+      approvedManifest: canonicalManifest,
+      legacyMigrated: false,
+    });
+    const catalogItem = summary({
+      ghostId: 'helper', namespace: 'other', scope: 'organization', organizationId: 'org-1',
+      currentRelease: { ...summary().currentRelease, id: RELEASE_ID },
+    });
+    const h = harness([catalogItem, summary({ id: `c${'d'.repeat(24)}`, ghostId: 'helper', namespace: null })]);
+    const record = recordForTest(catalogItem, {
+      namespace: 'acme', manifestDigest: ghostManifestDigest(canonicalManifest),
+    });
+    h.ledger.upsertInstallation(record);
+    h.ledger.markRemovedRecord(record, 'user-1');
+
+    await h.service.snapshot();
+
+    expect(h.ledger.installationForIdentity({ namespace: 'acme', ghostId: 'helper' }))
+      .toMatchObject({ installed: false });
+  });
+
   it('keeps a disconnected route detached when a modern receipt names another manifest', async () => {
     const canonicalManifest = normalizedManifest(manifest());
     const item = summary({

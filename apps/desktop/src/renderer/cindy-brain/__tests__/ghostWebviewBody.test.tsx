@@ -87,7 +87,7 @@ describe('GhostWebviewBody', () => {
     expect(container.querySelector('webview')).toBe(webview);
   });
 
-  it('keeps in-place namespaced plugins on the original partition', async () => {
+  it('isolates an in-place namespaced plugin from a later root partition', async () => {
     const inPlace = {
       ...manifest,
       id: 'xd-feishu',
@@ -104,8 +104,22 @@ describe('GhostWebviewBody', () => {
       expect(node).not.toBeNull();
       return node as HTMLElement;
     });
-    expect(webview.getAttribute('partition')).toBe('cindy-ghost-xd-feishu');
+    expect(webview.getAttribute('partition')).toBe('cindy-ghost-_ns__xd__xd-feishu');
     expect(webview.getAttribute('src')).toBe('cindy-ghost://xd-feishu/settings.html');
+  });
+
+  it('remounts a live panel when an in-place install gains a namespace', async () => {
+    const root = { manifest, dir: '/plugins/workspace' };
+    const { container, rerender } = render(
+      <GhostWebviewBody ghost={root} html={manifest.mainView?.html} />,
+    );
+    const previous = container.querySelector('webview');
+    expect(previous?.getAttribute('partition')).toBe('cindy-ghost-workspace');
+
+    rerender(<GhostWebviewBody ghost={{ ...root, namespace: 'acme' }} html={manifest.mainView?.html} />);
+    const current = container.querySelector('webview');
+    expect(current).not.toBe(previous);
+    expect(current?.getAttribute('partition')).toBe('cindy-ghost-_ns__acme__workspace');
   });
 
   it('uses the namespaced storage part when the install directory is under _ns', async () => {

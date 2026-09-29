@@ -69,6 +69,16 @@ describe('ghost 写路径 IPC 的 owner 租约(源码契约)', () => {
     expect(fn).toContain('beginGhostMutation(');
   });
 
+  it('卸载按物理存储键清理寄存引用、近期使用及提醒，而非目录相对路径', () => {
+    const start = source.indexOf('async function uninstallGhostAndCleanupLocked');
+    const block = source.slice(start, source.indexOf('\n}', start));
+    expect(block).toContain("removeRefs({ refKind: 'ghost-deposit', refId: storagePart })");
+    expect(block).toContain('forgetGhostRecentUsage(storagePart)');
+    expect(block).toContain('forgetGhostRecommendations(storagePart)');
+    expect(block).toContain('extinguishGhostUnread(storagePart)');
+    expect(block).toContain('badgeSlotSingleton?.forget(storagePart)');
+  });
+
   it('市场装入/更新持租约(installOrUpdateMarketGhostPackage)', () => {
     // 同上:外层委托 withGhostInstallLock,owner 捕获 + 起租约在 ...Locked 内。
     const outerStart = source.indexOf('export async function installOrUpdateMarketGhostPackage');

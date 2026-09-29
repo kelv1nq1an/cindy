@@ -107,7 +107,7 @@ describe('plugin recommendation recovery', () => {
       toast: { error: vi.fn() },
     });
     await run({ suggestion, ownerId: 'owner', targetKey: 'local', workingDir: '/project' });
-    expect(fillComposerWithSuggestion).toHaveBeenCalledWith('$org Org task');
+    expect(fillComposerWithSuggestion).toHaveBeenCalledWith('$org/acme Org task');
     expect(markUsed).toHaveBeenCalledWith('_ns__acme__helper');
   });
 
@@ -137,6 +137,13 @@ describe('plugin recommendation recovery', () => {
     const translate = (_key: string, options?: Record<string, unknown>) => 'Use ' + options?.id;
     expect(pluginSuggestionComposerText('Org task', org, translate)).toBe('Org task\n\nUse _ns__acme__helper');
     expect(pluginSuggestionComposerText('Root task', root, translate)).toBe('Root task\n\nUse helper');
+  });
+
+  it('qualifies a selected root command when a namespaced sibling shares it', () => {
+    const root = { manifest: { id: 'helper', name: 'Root', command: 'draw' }, namespace: null };
+    const org = { manifest: { id: 'helper', name: 'Org', command: 'draw' }, namespace: 'acme' };
+    expect(pluginSuggestionComposerText('Root task', root, () => '', [root, org])).toBe('$draw/@root Root task');
+    expect(pluginSuggestionComposerText('Org task', org, () => '', [root, org])).toBe('$draw/acme Org task');
   });
 
   it('loads project overrides on entry and clears them when choosing global scope', () => {

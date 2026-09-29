@@ -96,6 +96,13 @@ function renderSettings(settingsHeight?: number, measuredHeight?: number) {
 }
 
 describe('GhostSettingsWebview layout ownership', () => {
+  it('moves an in-place namespaced settings page off the root WebView partition', () => {
+    const { ghost, view, webview } = renderSettings();
+    expect(webview.getAttribute('partition')).toBe('cindy-ghost-example-settings-layout');
+    view.rerender(<GhostSettingsWebview ghost={{ ...ghost, namespace: 'acme' }} />);
+    expect(view.container.querySelector('webview')?.getAttribute('partition'))
+      .toBe('cindy-ghost-_ns__acme__example-settings-layout');
+  });
   it('keeps account status visible and the plugin form collapsed without a duplicate title', () => {
     const { ghost, view } = renderSettings();
     view.rerender(

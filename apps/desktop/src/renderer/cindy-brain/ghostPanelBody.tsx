@@ -13,7 +13,7 @@ import {
 import { toast } from '@/lib/toast';
 
 import { GHOST_SCHEME, ghostPartition, type InstalledGhost } from '../../shared/ghost';
-import { installedGhostStoragePart } from '../../shared/pluginIdentity';
+import { installedGhostLogicalIdentity, installedGhostStoragePart, pluginStoragePart } from '../../shared/pluginIdentity';
 import { createGhostThemeInjector, observeHostTheme } from './ghostPanelTheme';
 import {
   clearGhostUnread,
@@ -202,6 +202,7 @@ export function GhostWebviewBody({
   const { manifest } = ghost;
   const instanceId = installedGhostStoragePart(ghost);
   const [crashed, setCrashed] = useState(false);
+  const partitionClaim = ghostPartition(pluginStoragePart(installedGhostLogicalIdentity(ghost)));
   const [generation, setGeneration] = useState(0);
   const [mediaMenu, setMediaMenu] = useState<GhostPanelMediaMenuState | null>(null);
   const hostRef = useRef<HTMLDivElement | null>(null);
@@ -218,10 +219,7 @@ export function GhostWebviewBody({
     const host = hostRef.current;
     if (!host) return;
     const webview = document.createElement('webview') as WebviewTag;
-    webview.setAttribute(
-      'partition',
-      ghostPartition(instanceId),
-    );
+    webview.setAttribute('partition', partitionClaim);
     webview.setAttribute('src', `${GHOST_SCHEME}://${manifest.id}/${html}`);
     webview.setAttribute('style', 'display:flex;flex:1 1 auto;width:100%;height:100%;');
     let disposed = false;
@@ -294,7 +292,7 @@ export function GhostWebviewBody({
     };
     // version 入依赖:原位更新换版后 webview 重挂载,面板立刻跑新代码
     // (供片协议直读安装目录,不重挂会一直渲染旧版缓存的页面)。
-  }, [crashed, generation, instanceId, manifest.id, manifest.version, manifest.resolvedLocale, html]);
+  }, [crashed, generation, instanceId, partitionClaim, manifest.id, manifest.version, manifest.resolvedLocale, html]);
 
   if (crashed) {
     return (

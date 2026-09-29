@@ -2591,8 +2591,11 @@ export class PluginMarketService {
   ): Promise<void> {
     const pluginIdCounts = new Map<string, number>();
     const ghostCounts = ghostIdCounts(plugins);
+    const identityCounts = new Map<string, number>();
     for (const plugin of plugins) {
       pluginIdCounts.set(plugin.id, (pluginIdCounts.get(plugin.id) ?? 0) + 1);
+      const key = pluginLedgerRecordKey(plugin);
+      identityCounts.set(key, (identityCounts.get(key) ?? 0) + 1);
     }
     const summariesById = new Map(plugins.map((plugin) => [plugin.id, plugin]));
     const records = Object.values(ledger.read().installations);
@@ -2608,9 +2611,12 @@ export class PluginMarketService {
         !isValidGhostId(record.ghostId) ||
         !/^[a-f0-9]{64}$/.test(record.sha256) ||
         pluginIdCounts.get(record.pluginId) !== 1 ||
-        ghostCounts.get(record.ghostId) !== 1 ||
         !summary ||
+        (ghostCounts.get(record.ghostId) !== 1 &&
+          !(hasDeliveryNamespace(record) && hasDeliveryNamespace(summary) &&
+            identityCounts.get(pluginLedgerRecordKey(record)) === 1)) ||
         summary.ghostId !== record.ghostId ||
+        knownDeliveryNamespacesDiffer(summary, record) ||
         summary.scope !== record.scope ||
         summary.organizationId !== record.organizationId
       ) {
