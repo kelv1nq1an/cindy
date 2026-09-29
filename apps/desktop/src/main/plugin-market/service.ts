@@ -257,11 +257,12 @@ function snapshotGhost(
   local: LocalInstallSnapshot,
   plugin: { ghostId: string; namespace?: string | null },
 ): InstalledGhost | undefined {
+  const ghosts = local.ghostsById.get(plugin.ghostId) ?? [];
   if (!isValidGhostId(plugin.ghostId)) {
-    return local.ghosts.find((ghost) => ghost.manifest.id === plugin.ghostId);
+    return ghosts[0];
   }
   return findInstalledGhostByIdentity(
-    local.ghosts,
+    ghosts,
     createPluginLogicalIdentity(
       hasDeliveryNamespace(plugin) ? plugin.namespace : null,
       plugin.ghostId,
@@ -282,10 +283,8 @@ function legacyOrganizationDeliveryTarget<T extends VisiblePluginSummary | Visib
   local: LocalInstallSnapshot,
 ): T {
   if (hasDeliveryNamespace(plugin) || plugin.scope !== 'organization') return plugin;
-  const ghosts = local.ghosts.filter((ghost) => ghost.manifest.id === plugin.ghostId);
-  const records = Object.values(local.installations).filter(
-    (record) => record.ghostId === plugin.ghostId && record.installed,
-  );
+  const ghosts = local.ghostsById.get(plugin.ghostId) ?? [];
+  const records = local.installedRecordsByGhostId.get(plugin.ghostId) ?? [];
   if (ghosts.length !== 1 || records.length !== 1) return plugin;
   const ghost = ghosts[0]!;
   const record = records[0]!;
@@ -718,8 +717,10 @@ function sameDisconnectedMarketInstallation(
 interface LocalInstallSnapshot {
   /** Installed Ghost runtime facts for one market operation. */
   ghosts: readonly InstalledGhost[];
+  ghostsById: ReadonlyMap<string, readonly InstalledGhost[]>;
   /** Parsed provenance records from one ledger read. */
   installations: Readonly<Record<string, PluginMarketInstallationRecord>>;
+  installedRecordsByGhostId: ReadonlyMap<string, readonly PluginMarketInstallationRecord[]>;
   /** locale 无关 Manifest 身份，按实例 storage part 索引。 */
   manifestIdentityByStoragePart: ReadonlyMap<string, InstalledMarketManifestIdentity | null>;
 }
@@ -727,9 +728,22 @@ interface LocalInstallSnapshot {
 /** 未登录浏览公开目录时不读本机账本 / 已装列表，避免带出上一账号的安装态。 */
 const EMPTY_LOCAL_INSTALL_SNAPSHOT: LocalInstallSnapshot = {
   ghosts: [],
+  ghostsById: new Map(),
   installations: {},
+  installedRecordsByGhostId: new Map(),
   manifestIdentityByStoragePart: new Map(),
 };
+
+function indexByGhostId<T>(items: readonly T[], ghostId: (item: T) => string): Map<string, T[]> {
+  const indexed = new Map<string, T[]>();
+  for (const item of items) {
+    const id = ghostId(item);
+    const matches = indexed.get(id) ?? [];
+    matches.push(item);
+    indexed.set(id, matches);
+  }
+  return indexed;
+}
 
 /**
  * 清理通告 pending 汇总的 owner 隔离键。**故意不含 generation**：同一 owner
@@ -2859,7 +2873,11 @@ export class PluginMarketService {
           if (reason) return skip(removal, reason);
 
           removalGhosts ??= getGhostManager().list();
-          const installed = snapshotGhost({ ghosts: removalGhosts, installations: {}, manifestIdentityByStoragePart: new Map() }, resolved);
+          const installed = snapshotGhost({
+            ...EMPTY_LOCAL_INSTALL_SNAPSHOT,
+            ghosts: removalGhosts,
+            ghostsById: indexByGhostId(removalGhosts, (ghost) => ghost.manifest.id),
+          }, resolved);
           if (!installed) return skip(removal, 'runtime-not-installed');
           // 溯源摘要闸:账本记录只证明"市场装过这个 ghostId",不证明现在占位的
           // 还是那份包——本地 .cindy 可原位替换,替换不写市场账本。摘要对不上
@@ -3290,9 +3308,12 @@ export class PluginMarketService {
     installations = ledger.read().installations,
   ): LocalInstallSnapshot {
     const ghosts = getGhostManager().list();
+    const records = Object.values(installations).filter((record) => record.installed);
     return {
       ghosts,
+      ghostsById: indexByGhostId(ghosts, (ghost) => ghost.manifest.id),
       installations,
+      installedRecordsByGhostId: indexByGhostId(records, (record) => record.ghostId),
       manifestIdentityByStoragePart: new Map(
         ghosts.map((ghost) => [
           installedGhostStoragePart(ghost),

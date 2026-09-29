@@ -19,9 +19,6 @@ export interface PluginLogicalIdentity {
   ghostId: string;
 }
 
-const ID_SEPARATOR = '\u0000';
-const ROOT_NAMESPACE_TOKEN = '@root';
-
 export function resolvePluginNamespaceState(raw: unknown): PluginNamespaceState {
   if (!Object.prototype.hasOwnProperty.call(Object(raw), 'namespace')) {
     return { kind: 'legacy' };
@@ -43,34 +40,6 @@ export function createPluginLogicalIdentity(
   }
   if (!isValidGhostId(ghostId)) throw new Error('插件 ghostId 不合法');
   return { namespace, ghostId };
-}
-
-/**
- * Internal opaque key for ledgers, locks and storage maps.
- * Length/framing is explicit so namespace and ghostId cannot collide.
- */
-export function pluginLogicalIdentityKey(identity: PluginLogicalIdentity): string {
-  const namespace = identity.namespace ?? ROOT_NAMESPACE_TOKEN;
-  return `${encodeURIComponent(namespace)}${ID_SEPARATOR}${encodeURIComponent(identity.ghostId)}`;
-}
-
-export function parsePluginLogicalIdentityKey(value: string): PluginLogicalIdentity {
-  const separator = value.indexOf(ID_SEPARATOR);
-  if (separator <= 0 || separator === value.length - 1 || value.indexOf(ID_SEPARATOR, separator + 1) !== -1) {
-    throw new Error('插件复合身份键格式不合法');
-  }
-  let namespace: string;
-  let ghostId: string;
-  try {
-    namespace = decodeURIComponent(value.slice(0, separator));
-    ghostId = decodeURIComponent(value.slice(separator + 1));
-  } catch {
-    throw new Error('插件复合身份键编码不合法');
-  }
-  return createPluginLogicalIdentity(
-    namespace === ROOT_NAMESPACE_TOKEN ? null : namespace,
-    ghostId,
-  );
 }
 
 export function hasDeliveryNamespace(
@@ -162,7 +131,7 @@ export function isValidPluginInstallRelId(value: unknown): value is string {
  * Flat filesystem/vault/session id.
  * Root stays `helper`; organization instances use `_ns__<namespace>__<ghostId>`.
  * Double underscore is unambiguous because neither namespace nor ghostId contains `_`.
- * Do not persist pluginLogicalIdentityKey (NUL) or pluginInstallRelId (`/`) as vault or file names.
+ * Do not persist pluginInstallRelId (`/`) as a vault or file name.
  */
 export function pluginStoragePart(identity: PluginLogicalIdentity): string {
   if (identity.namespace === null) return identity.ghostId;

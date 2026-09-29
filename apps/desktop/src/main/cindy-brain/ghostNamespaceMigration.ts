@@ -29,15 +29,11 @@ export type NamespaceMigrationBasis =
   | 'forge-current-org'
   | 'receipt-recovered';
 
-export type NamespaceMigrationEntryStatus = 'pending' | 'committed';
-
 export interface NamespaceMigrationEntry {
   ghostId: string;
   relId: string;
   capturedAt: string;
-  status: NamespaceMigrationEntryStatus;
-  namespace?: string | null;
-  committedAt?: string;
+  status: 'pending';
   basis?: NamespaceMigrationBasis | 'awaiting-facts';
 }
 
@@ -165,7 +161,7 @@ export function dropNamespaceMigrationEntry(
   ledger: NamespaceMigrationLedger,
   ghostId: string,
 ): NamespaceMigrationLedger {
-  if (!(ghostId in ledger.entries)) return ledger;
+  if (!Object.hasOwn(ledger.entries, ghostId)) return ledger;
   const entries = { ...ledger.entries };
   delete entries[ghostId];
   return { ...ledger, entries };
@@ -176,7 +172,7 @@ export function captureRecoveredNamespaceEntry(
   candidate: NamespaceCensusCandidate,
   now: string,
 ): NamespaceMigrationLedger {
-  if (!isCensusCandidate(candidate) || ledger.entries[candidate.ghostId]) return ledger;
+  if (!isCensusCandidate(candidate) || Object.hasOwn(ledger.entries, candidate.ghostId)) return ledger;
   return {
     ...ledger,
     entries: {
@@ -265,44 +261,6 @@ function matchingOrganizationNamespace(
   return namespace && isValidPluginNamespace(namespace) ? namespace : null;
 }
 
-export function commitNamespaceMigration(
-  ledger: NamespaceMigrationLedger,
-  ghostId: string,
-  namespace: string | null,
-  basis: NamespaceMigrationBasis,
-  now: string,
-): NamespaceMigrationLedger {
-  const current = ledger.entries[ghostId];
-  if (!current || current.status === 'committed') {
-    return ledger;
-  }
-  if (namespace !== null && !isValidPluginNamespace(namespace)) {
-    return ledger;
-  }
-  return {
-    ...ledger,
-    entries: {
-      ...ledger.entries,
-      [ghostId]: {
-        ...current,
-        status: 'committed',
-        namespace,
-        committedAt: now,
-        basis,
-      },
-    },
-  };
-}
-
-export function commitRootNamespaceMigration(
-  ledger: NamespaceMigrationLedger,
-  ghostId: string,
-  basis: NamespaceMigrationBasis,
-  now: string,
-): NamespaceMigrationLedger {
-  return commitNamespaceMigration(ledger, ghostId, null, basis, now);
-}
-
 export type NamespaceCommitPlan =
   | { kind: 'skip'; reason: 'not-pending' | 'busy' }
   | { kind: 'write-ledger-only'; namespace: string | null; basis: 'receipt-recovered' }
@@ -340,16 +298,14 @@ export function planNamespaceCommit(input: {
 }
 
 export function pendingNamespaceGhostIds(ledger: NamespaceMigrationLedger): string[] {
-  return Object.values(ledger.entries)
-    .filter((entry) => entry.status === 'pending')
-    .map((entry) => entry.ghostId);
+  return Object.keys(ledger.entries);
 }
 
 export function isPendingNamespaceGhost(
   ledger: NamespaceMigrationLedger | null,
   ghostId: string,
 ): boolean {
-  return ledger?.entries[ghostId]?.status === 'pending';
+  return ledger !== null && Object.hasOwn(ledger.entries, ghostId);
 }
 
 export function parseNamespaceMigrationLedger(raw: unknown): NamespaceMigrationLedger | null {
@@ -361,7 +317,7 @@ export function parseNamespaceMigrationLedger(raw: unknown): NamespaceMigrationL
   for (const [key, value] of Object.entries(raw.entries)) {
     const entry = parseEntry(value);
     if (!entry || entry.ghostId !== key) return null;
-    entries[key] = entry;
+    if (entry.status === 'pending') entries[key] = entry;
   }
   return {
     schemaVersion: NAMESPACE_MIGRATION_SCHEMA_VERSION,
@@ -370,12 +326,14 @@ export function parseNamespaceMigrationLedger(raw: unknown): NamespaceMigrationL
   };
 }
 
-function parseEntry(value: unknown): NamespaceMigrationEntry | null {
+function parseEntry(value: unknown): NamespaceMigrationEntry | {
+  ghostId: string;
+  status: 'committed';
+} | null {
   if (!isPlainObject(value)) return null;
   if (!isValidGhostId(value.ghostId) || typeof value.relId !== 'string') return null;
   if (value.relId !== value.ghostId) return null;
   if (!isIsoTimestamp(value.capturedAt)) return null;
-  if (value.status !== 'pending' && value.status !== 'committed') return null;
   if (value.status === 'pending') {
     return {
       ghostId: value.ghostId,
@@ -385,18 +343,11 @@ function parseEntry(value: unknown): NamespaceMigrationEntry | null {
       ...(typeof value.basis === 'string' ? { basis: value.basis as NamespaceMigrationEntry['basis'] } : {}),
     };
   }
+  if (value.status !== 'committed') return null;
   if (value.namespace !== null && !isValidPluginNamespace(value.namespace)) return null;
   if (!isIsoTimestamp(value.committedAt)) return null;
   if (!isCommittedBasis(value.basis)) return null;
-  return {
-    ghostId: value.ghostId,
-    relId: value.relId,
-    capturedAt: value.capturedAt,
-    status: 'committed',
-    namespace: value.namespace === null ? null : value.namespace,
-    committedAt: value.committedAt,
-    basis: value.basis,
-  };
+  return { ghostId: value.ghostId, status: 'committed' };
 }
 
 function isCommittedBasis(value: unknown): value is NamespaceMigrationBasis {

@@ -622,6 +622,7 @@ describe('GhostManager namespace migration census', () => {
     await expect(manager.commitPendingNamespace('xd-feishu', 'xd', 'market-organization')).resolves.toEqual({
       ok: true,
     });
+    expect(manager.ensureNamespaceMigrationCensus()?.entries).toEqual({});
     const ghost = manager.list()[0];
     expect(ghost).toMatchObject({
       manifest: { id: 'xd-feishu' },
@@ -633,6 +634,26 @@ describe('GhostManager namespace migration census', () => {
     const { installedGhostStoragePart, installedGhostRuntimeId } = await import('../../../shared/pluginIdentity.js');
     expect(installedGhostStoragePart(ghost!)).toBe('xd-feishu');
     expect(installedGhostRuntimeId(ghost!)).toBe('xd-feishu');
+  });
+
+  it('finishes a receipt-first commit by removing the pending entry after a restart', async () => {
+    await plantLegacyInstall('hello');
+    expect(manager.ensureNamespaceMigrationCensus()?.entries.hello?.status).toBe('pending');
+    const stateRoot = path.join(workDir, 'ghosts-install-state');
+    const receipts = new GhostInstallReceiptStore(() => stateRoot, async ({ parentDir, ...request }) => {
+      await runGhostSnapshotWorkerRequest(request, parentDir);
+    });
+    const approval = receipts.read('hello');
+    if (approval.state !== 'approved') throw new Error('expected approved receipt');
+    await receipts.write({ ...approval.receipt, namespace: 'xd' }, {
+      relId: 'hello', skillSourceDir: path.join(rootDir, 'hello'), requireSkillSnapshot: false,
+    });
+    manager = new GhostManager({ getRootDir: () => rootDir, getStateDir: () => stateRoot });
+    await expect(manager.commitPendingNamespace('hello', null, 'market-public')).resolves.toEqual({ ok: true });
+    expect(manager.ensureNamespaceMigrationCensus()?.entries).toEqual({});
+    manager = new GhostManager({ getRootDir: () => rootDir, getStateDir: () => stateRoot });
+    expect(manager.list()[0]).toMatchObject({ namespace: 'xd', dir: path.join(rootDir, 'hello') });
+    expect(manager.list()[0]?.namespaceMigration).toBeUndefined();
   });
 
   it('disables and uninstalls an in-place namespaced plugin without inventing _ns paths', async () => {

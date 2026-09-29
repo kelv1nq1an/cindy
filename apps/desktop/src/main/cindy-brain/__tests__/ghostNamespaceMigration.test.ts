@@ -4,11 +4,10 @@ import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import {
+  captureRecoveredNamespaceEntry,
   censusNamespaceMigration,
   dropNamespaceMigrationEntry,
   classifyNamespaceMigration,
-  commitNamespaceMigration,
-  commitRootNamespaceMigration,
   createNamespaceMigrationStore,
   isCensusCandidate,
   isPendingNamespaceGhost,
@@ -82,6 +81,15 @@ describe('censusNamespaceMigration', () => {
     );
     expect(duringUpdateBackup).toEqual({ kind: 'unchanged', ledger: created.ledger });
     expect(dropNamespaceMigrationEntry(created.ledger, 'xd-feishu').entries).toEqual({});
+  });
+
+  it('does not mistake inherited object keys for pending plugin ids', () => {
+    const created = censusNamespaceMigration({ kind: 'missing' }, [], NOW);
+    if (created.kind !== 'created') throw new Error('expected census');
+    expect(isPendingNamespaceGhost(created.ledger, 'constructor')).toBe(false);
+    expect(dropNamespaceMigrationEntry(created.ledger, 'constructor')).toBe(created.ledger);
+    const captured = captureRecoveredNamespaceEntry(created.ledger, candidate('constructor'), NOW);
+    expect(isPendingNamespaceGhost(captured, 'constructor')).toBe(true);
   });
 
   it('does not recensus a corrupt or unreadable ledger', () => {
@@ -267,33 +275,36 @@ describe('classifyNamespaceMigration', () => {
 });
 
 describe('commit and install conflict', () => {
-  it('stamps only captured pending ids as committed root', () => {
+  it('removes only captured pending ids after their receipts are committed', () => {
     const created = censusNamespaceMigration({ kind: 'missing' }, [candidate('hello')], NOW);
     if (created.kind !== 'created') throw new Error('expected census');
-    const committed = commitRootNamespaceMigration(created.ledger, 'hello', 'builtin', NOW);
-    expect(committed.entries.hello).toMatchObject({
-      status: 'committed',
-      namespace: null,
-      basis: 'builtin',
-    });
+    const committed = dropNamespaceMigrationEntry(created.ledger, 'hello');
+    expect(committed.entries).toEqual({});
     expect(pendingNamespaceGhostIds(committed)).toEqual([]);
     expect(isPendingNamespaceGhost(committed, 'hello')).toBe(false);
+    expect(censusNamespaceMigration(
+      { kind: 'ok', ledger: committed }, [candidate('hello')], NOW,
+    )).toEqual({ kind: 'unchanged', ledger: committed });
+  });
 
-    const orgCreated = censusNamespaceMigration({ kind: 'missing' }, [candidate('xd-feishu')], NOW);
-    if (orgCreated.kind !== 'created') throw new Error('expected census');
-    const orgCommitted = commitNamespaceMigration(
-      orgCreated.ledger,
-      'xd-feishu',
-      'xd',
-      'market-organization',
-      NOW,
-    );
-    expect(orgCommitted.entries['xd-feishu']).toMatchObject({
-      status: 'committed',
-      namespace: 'xd',
-      relId: 'xd-feishu',
-      basis: 'market-organization',
+  it('reads old committed entries without reopening the one-shot census', () => {
+    const parsed = parseNamespaceMigrationLedger({
+      schemaVersion: 1,
+      censusedAt: NOW,
+      entries: {
+        hello: { ghostId: 'hello', relId: 'hello', capturedAt: NOW, status: 'committed', namespace: null, committedAt: NOW, basis: 'builtin' },
+        helper: { ghostId: 'helper', relId: 'helper', capturedAt: NOW, status: 'pending' },
+      },
     });
+    expect(parsed?.entries).toEqual({
+      helper: { ghostId: 'helper', relId: 'helper', capturedAt: NOW, status: 'pending' },
+    });
+    expect(censusNamespaceMigration({ kind: 'ok', ledger: parsed! }, [candidate('hello')], NOW).kind).toBe('unchanged');
+    expect(parseNamespaceMigrationLedger({
+      schemaVersion: 1,
+      censusedAt: NOW,
+      entries: { hello: { ghostId: 'hello', relId: 'hello', capturedAt: NOW, status: 'committed', namespace: 'INVALID', committedAt: NOW, basis: 'builtin' } },
+    })).toBeNull();
   });
 
   it('blocks a same-name org install until the pending instance is classified as root', () => {

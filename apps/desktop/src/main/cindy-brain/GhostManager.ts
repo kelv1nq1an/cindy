@@ -64,7 +64,6 @@ import {
 import { readBoundedFileNoFollowSync } from '../utils/readBoundedFile.js';
 import { checkSkillMdConsistency } from './skillSlot.js';
 import {
-  commitNamespaceMigration,
   captureRecoveredNamespaceEntry,
   createNamespaceMigrationStore,
   censusNamespaceMigration,
@@ -911,7 +910,7 @@ export class GhostManager {
     }
     this.options.onNamespaceCommitted?.(ghostId, plan.namespace);
     this.namespaceMigrationStore().write(
-      commitNamespaceMigration(ledger, ghostId, plan.namespace, plan.basis, new Date().toISOString()),
+      dropNamespaceMigrationEntry(ledger, ghostId),
     );
     this.options.onChanged?.(this.list());
     return { ok: true };
