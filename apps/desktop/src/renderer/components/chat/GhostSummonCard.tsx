@@ -275,6 +275,7 @@ export function GhostSummonCard({
   // 安装状态(意识被卸下后自然回退幽灵图标,不缓存失效数据)。
   const installedGhosts = useInstalledGhosts();
   const ghostByInstanceId = (ghostId: string) => {
+    if (isValidGhostId(ghostId)) return undefined;
     const physical = findInstalledGhostByInstanceId(installedGhosts, ghostId);
     if (physical) return physical;
     const identity = parsePluginInstanceId(ghostId);

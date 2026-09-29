@@ -98,6 +98,19 @@ describe('PluginMarketLedger', () => {
     expect(ledger.stampNamespaceIfAbsent('missing', 'acme')).toBe(false);
   });
 
+  it('stamps the installed record even when a removed record shares its ghost id', () => {
+    const { ledger } = harness();
+    ledger.upsertInstallation(record({ ghostId: 'helper' }));
+    ledger.upsertInstallation(record({ ghostId: 'helper', pluginId: 'removed',
+      namespace: 'other', scope: 'organization', organizationId: 'org-other', installed: false }));
+    expect(ledger.hasInstalledRecordForGhostId('helper')).toBe(true);
+    expect(ledger.stampNamespaceIfAbsent('helper', 'acme')).toBe(true);
+    expect(ledger.installationsForGhost('helper')).toEqual(expect.arrayContaining([
+      expect.objectContaining({ installed: true, namespace: 'acme' }),
+      expect.objectContaining({ installed: false, namespace: 'other' }),
+    ]));
+  });
+
   it('backfills raw manifest identity without changing legacy routing fields', () => {
     const { ledger } = harness();
     const legacy = record({ manifestDigest: 'c'.repeat(64) });

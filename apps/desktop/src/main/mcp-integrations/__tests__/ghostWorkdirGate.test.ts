@@ -1218,6 +1218,16 @@ describe('connect_account ordinary task entry', () => {
       .toMatchObject({ ok: true, status: 'ready' });
     expect(ensureReadyMock).toHaveBeenCalledWith(expect.objectContaining({ ghostId: 'art' }));
   });
+  it('rechecks a physically namespaced organization after its setup completes', async () => {
+    setupAssessmentMock.mockReturnValue(configured);
+    listMock.mockReturnValue([
+      { ...(chipGhost('art') as object), namespace: null },
+      { ...(chipGhost('art') as object), namespace: 'acme', dir: '/fake/_ns/acme/art' },
+    ]);
+    expect(await makeDeps().connectAccount!({ kind: 'plugin', id: 'art', namespace: 'acme' }))
+      .toMatchObject({ ok: true, status: 'ready' });
+    expect(ensureReadyMock).toHaveBeenCalledWith(expect.objectContaining({ ghostId: '_ns__acme__art' }));
+  });
   it('keeps Host-derived GitHub login on its existing path without a cloud-only adapter', async () => {
     listMock.mockReturnValue([chipGhost('cindy-github')]);
     const signal = new AbortController().signal;

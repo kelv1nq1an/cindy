@@ -380,10 +380,14 @@ export function organizationDefaultTakeoverEligibility(
   if (facts.record && knownDeliveryNamespacesDiffer(summary, facts.record)) {
     return { eligible: false, reason: 'cross-namespace' };
   }
-  if (!facts.uniqueGhostId) return { eligible: false, reason: 'duplicate-ghost-id' };
+  if (!facts.uniqueGhostId && !hasDeliveryNamespace(summary)) {
+    return { eligible: false, reason: 'duplicate-ghost-id' };
+  }
   if (!facts.runtimeAvailable) return { eligible: false, reason: 'runtime-unavailable' };
   if (facts.optedOut) return { eligible: false, reason: 'explicit-opt-out' };
-  if (facts.builtinRemoved) return { eligible: false, reason: 'builtin-tombstone' };
+  if (facts.builtinRemoved && summary.namespace == null) {
+    return { eligible: false, reason: 'builtin-tombstone' };
+  }
   if (facts.busy) return { eligible: false, reason: 'busy' };
   if (installed.approval.state !== 'approved') {
     return { eligible: false, reason: 'unapproved-install' };
@@ -665,6 +669,8 @@ function canBackfillOfficialCindyGithubTrust(
   return (
     record.installed &&
     record.source === 'market' &&
+    record.scope === 'public' &&
+    record.namespace == null &&
     record.manifestDigest !== undefined &&
     installed.approval.state === 'approved' &&
     (!isCindyOfficialTrustInfo(installed.trust) || !hasCindyOfficialTrustMetadata(installed.dir)) &&
@@ -939,6 +945,9 @@ export class PluginMarketService {
       };
       if (!options.discoveryOnly && !options.deferReconciliation) await reconcileCustomUpdates();
       requireSameMarketOwner(owner);
+      if (!options.discoveryOnly) {
+        getGhostManager().resumePendingResidentsOffline?.();
+      }
       const snapshot: PluginMarketSnapshot = {
         items: this.withUpdateConsentHolds(
           this.projectCustomItems(customDiscovery.entries, this.localInstallSnapshot(ledger)),
@@ -2309,7 +2318,8 @@ export class PluginMarketService {
         version: plugin.currentRelease.version,
         consent: options.consent,
         ...deliveryNamespaceFields(plugin),
-        ...(plugin.ghostId === 'cindy-github' ? { officialCindyGithub: true } : {}),
+        ...(plugin.ghostId === 'cindy-github' && plugin.scope === 'public' &&
+          plugin.namespace == null ? { officialCindyGithub: true } : {}),
         ...(plugin.scope === 'organization' && plugin.organizationId
           ? {
               pendingMarketRecord: {
@@ -2922,14 +2932,15 @@ export class PluginMarketService {
     const ledgerData = ledger.read();
     const local = this.localInstallSnapshot(ledger, ledgerData.installations);
     for (const summary of plugins) {
+      const uniqueIdentity = uniqueGhostIds.has(summary.ghostId) ||
+        (hasDeliveryNamespace(summary) && identityCounts.get(pluginLedgerRecordKey(summary)) === 1);
       if (!summary.defaultInstall ||
-          (!uniqueGhostIds.has(summary.ghostId) &&
-            (!hasDeliveryNamespace(summary) || identityCounts.get(pluginLedgerRecordKey(summary)) !== 1))) continue;
+          !uniqueIdentity) continue;
       if (!isGhostAvailableForActiveSession(summary.ghostId)) continue;
       if (ledgerData.defaultInstallOptOuts[installSubject]?.includes(summary.id)) continue;
-      if (isBuiltinGhostRemovedByUser(summary.ghostId)) continue;
+      if (summary.namespace == null && isBuiltinGhostRemovedByUser(summary.ghostId)) continue;
       const state = this.toItem(summary, local).installState;
-      if (state === 'conflict' && !uniqueGhostIds.has(summary.ghostId)) continue;
+      if (state === 'conflict' && !uniqueIdentity) continue;
       if (state !== 'not-installed' && state !== 'conflict') continue;
       const takeoverRetryKey = this.automaticUpgradeRetryKey(
         owner,
@@ -2970,7 +2981,7 @@ export class PluginMarketService {
               const eligibility = organizationDefaultTakeoverEligibility({
                 summary,
                 currentOrganization,
-                uniqueGhostId: uniqueGhostIds.has(summary.ghostId),
+                uniqueGhostId: uniqueIdentity,
                 installed: freshInstalled,
                 record: snapshotInstallation({ installations: freshLedgerData.installations }, summary) ?? null,
                 installOrigin,
@@ -3023,7 +3034,7 @@ export class PluginMarketService {
                   if (freshState === 'not-installed') {
                     if (
                       !isGhostAvailableForActiveSession(summary.ghostId) ||
-                      isBuiltinGhostRemovedByUser(summary.ghostId) ||
+                      (summary.namespace == null && isBuiltinGhostRemovedByUser(summary.ghostId)) ||
                       this.toItem(summary, commitLocal).installState !== 'not-installed'
                     ) {
                       throw new SilentDefaultInstallCancelledError(
@@ -3044,7 +3055,7 @@ export class PluginMarketService {
                   const eligibility = organizationDefaultTakeoverEligibility({
                     summary,
                     currentOrganization,
-                    uniqueGhostId: uniqueGhostIds.has(summary.ghostId),
+                    uniqueGhostId: uniqueIdentity,
                     installed: commitInstalled,
                     record: snapshotInstallation({ installations: commitLedgerData.installations }, summary) ?? null,
                     installOrigin: commitOrigin,

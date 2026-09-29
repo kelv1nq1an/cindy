@@ -1767,9 +1767,12 @@ export function getCindyGhostsMcpDeps(
       });
       if (!result.ok) return result;
       if (signal?.aborted) return { ok: false, errorCode: 'SETUP_CANCELLED' };
-      const current = classifyGhostVisibility(instanceId, workingDir, ghostVisibilityDeps,
+      const current = classifyGhostVisibility(target.id, workingDir, ghostVisibilityDeps,
         target.namespace);
       if (!current.ok) return current;
+      if (installedGhostStoragePart(current.ghost) !== instanceId) {
+        return { ok: false, errorCode: 'GHOST_NOT_FOUND' };
+      }
       const final = getGhostSetupAssessment(instanceId);
       if (final.state !== 'ready') return { ok: false, errorCode: 'SETUP_REQUIRED' };
       return { ok: true, status: 'ready', ghostId: target.id,

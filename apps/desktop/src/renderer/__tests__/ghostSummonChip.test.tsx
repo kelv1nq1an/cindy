@@ -86,6 +86,18 @@ afterEach(() => {
 });
 
 describe('GhostSummonCard(chip 形态)', () => {
+  it('does not attach a newly installed root version to an ambiguous historical bare id', () => {
+    installedGhostsMock.mockReturnValue([
+      { manifest: { id: 'helper', name: 'New Root', version: '99' },
+        dir: '/tmp/helper', namespace: null, iconDataUrl: 'data:image/png;base64,AAAA' },
+    ] as InstalledGhost[]);
+    const { container } = render(
+      <GhostSummonCard directive={{ kind: 'semantic', ghostIds: ['helper'] }} />,
+    );
+    expect(screen.queryByText('v99')).toBeNull();
+    expect(container.querySelector('img[src="data:image/png;base64,AAAA"]')).toBeNull();
+  });
+
   it('renders an organization semantic call instead of its same-id root neighbor', () => {
     installedGhostsMock.mockReturnValue([
       { manifest: { id: 'helper', name: 'Root', version: '1' }, dir: '/tmp/helper', namespace: null },

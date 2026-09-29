@@ -12,6 +12,7 @@ import {
   readNamespaceMigrationMarketRecord,
 } from '../ghostNamespaceMigration.js';
 import {
+  assertManagedPluginParentSync,
   GhostInstallReceiptStore,
   createGhostInstallReceipt,
   hashApprovedSkillContent,
@@ -53,6 +54,57 @@ function manifest(id = 'hello'): Record<string, unknown> {
     tools: [{ name: 'do_thing', description: 'do' }],
   };
 }
+
+it('rejects linked namespace parents for content recovery and state journals', async () => {
+  const outside = path.join(workDir, 'outside');
+  const contentNs = path.join(rootDir, '_ns');
+  const stateRoot = path.join(workDir, 'ghosts-install-state');
+  await fs.promises.mkdir(outside, { recursive: true });
+  await fs.promises.mkdir(rootDir, { recursive: true });
+  await fs.promises.writeFile(path.join(outside, 'sentinel'), 'keep');
+  await fs.promises.symlink(outside, contentNs, 'dir');
+  expect(() => assertManagedPluginParentSync(rootDir, '_ns/acme/hello')).toThrow();
+
+  const store = new GhostInstallReceiptStore(() => stateRoot);
+  await fs.promises.mkdir(stateRoot, { recursive: true });
+  await fs.promises.symlink(outside, path.join(stateRoot, '_ns'), 'dir');
+  await expect(store.writePendingMutation('_ns/acme/hello', {
+    kind: 'install', packageSha256: 'a'.repeat(64),
+  })).rejects.toThrow();
+  expect(store.readPendingMutationSync('_ns/acme/hello').state).toBe('unreadable');
+  expect(fs.readFileSync(path.join(outside, 'sentinel'), 'utf8')).toBe('keep');
+});
+
+it('does not recover an interrupted namespaced uninstall through a linked content parent', async () => {
+  const outside = path.join(workDir, 'outside');
+  const stateRoot = path.join(workDir, 'ghosts-install-state');
+  await fs.promises.mkdir(path.join(outside, 'acme', 'hello'), { recursive: true });
+  await fs.promises.writeFile(path.join(outside, 'acme', 'hello', 'sentinel'), 'keep');
+  await fs.promises.mkdir(rootDir, { recursive: true });
+  await fs.promises.symlink(outside, path.join(rootDir, '_ns'), 'dir');
+  const store = new GhostInstallReceiptStore(() => stateRoot);
+  await store.writePendingMutation('_ns/acme/hello', { kind: 'uninstall' });
+  manager = new GhostManager({ getRootDir: () => rootDir, getStateDir: () => stateRoot });
+  expect(fs.readFileSync(path.join(outside, 'acme', 'hello', 'sentinel'), 'utf8')).toBe('keep');
+  expect(store.readPendingMutationSync('_ns/acme/hello').state).toBe('valid');
+});
+
+it('refuses to publish a namespaced receipt through a linked approval parent', async () => {
+  await plantLegacyInstall('hello');
+  const stateRoot = path.join(workDir, 'ghosts-install-state');
+  const outside = path.join(workDir, 'outside');
+  await fs.promises.mkdir(outside);
+  await fs.promises.writeFile(path.join(outside, 'sentinel'), 'keep');
+  await fs.promises.symlink(outside, path.join(stateRoot, '_ns'), 'dir');
+  const store = new GhostInstallReceiptStore(() => stateRoot);
+  const approval = store.read('hello');
+  expect(approval.state).toBe('approved');
+  if (approval.state !== 'approved') return;
+  await expect(store.write({ ...approval.receipt, namespace: 'acme' }, {
+    relId: '_ns/acme/hello', requireSkillSnapshot: false,
+  })).rejects.toThrow('parent is not a real directory');
+  expect(fs.readFileSync(path.join(outside, 'sentinel'), 'utf8')).toBe('keep');
+});
 
 async function plantLegacyInstall(
   id: string,
@@ -177,6 +229,197 @@ describe('GhostManager namespace migration census', () => {
     await manager.reconcilePendingRootNamespaces(true);
     expect(manager.list()[0]).toMatchObject({ namespace: 'acme' });
     expect(manager.list()[0]?.namespaceMigration).toBeUndefined();
+  });
+
+  it('does not stamp an approval receipt when the market namespace stamp fails', async () => {
+    await plantLegacyInstall('hello');
+    manager = new GhostManager({
+      getRootDir: () => rootDir,
+      beforeNamespaceCommit: () => { throw new Error('market namespace conflict'); },
+    });
+    await expect(manager.commitPendingNamespace('hello', 'acme', 'market-organization'))
+      .rejects.toThrow('market namespace conflict');
+    const store = new GhostInstallReceiptStore(() => path.join(workDir, 'ghosts-install-state'));
+    const approval = store.read('hello');
+    expect(approval.state).toBe('approved');
+    if (approval.state === 'approved') expect(approval.receipt.namespace).toBeUndefined();
+    expect(manager.list()[0]?.namespaceMigration).toBe('pending');
+  });
+
+  it('runs an approved legacy resident offline, then stops it before stamping and restarts after commit', async () => {
+    await plantLegacyInstall('hello');
+    const events: string[] = [];
+    let runtimeBusy = false;
+    manager = new GhostManager({
+      getRootDir: () => rootDir,
+      classifyPendingNamespace: (_id, synced) => synced
+        ? { kind: 'commit', namespace: 'acme', basis: 'market-organization' }
+        : { kind: 'pending', reason: 'awaiting-market-facts' },
+      isNamespaceMigrationBusy: () => runtimeBusy,
+      canResumePendingResidentOffline: () => true,
+      onResumePendingResidentOffline: (ghost) => {
+        expect(ghost.approval.state).toBe('approved');
+        runtimeBusy = true;
+        events.push('started');
+      },
+      preparePendingResidentForMigration: async () => {
+        events.push('stopped');
+        runtimeBusy = false;
+        return true;
+      },
+      beforeNamespaceCommit: () => events.push('stamped'),
+      onNamespaceCommitted: () => events.push('restarted'),
+    });
+    manager.resumePendingResidentsOffline();
+    await manager.reconcilePendingRootNamespaces(false);
+    expect(events).toEqual(['started']);
+    expect(manager.list()[0]?.namespaceMigration).toBe('pending');
+    await manager.reconcilePendingRootNamespaces(true);
+    expect(events).toEqual(['started', 'stopped', 'stamped', 'restarted']);
+    expect(manager.list()[0]).toMatchObject({ namespace: 'acme' });
+  });
+
+  it('keeps a running offline resident pending when safe stop is deferred', async () => {
+    await plantLegacyInstall('hello');
+    const stopped = vi.fn(async () => false);
+    const deferred = vi.fn();
+    manager = new GhostManager({
+      getRootDir: () => rootDir,
+      classifyPendingNamespace: () => ({ kind: 'commit', namespace: 'acme', basis: 'market-organization' }),
+      isNamespaceMigrationBusy: () => true,
+      canResumePendingResidentOffline: () => true,
+      onResumePendingResidentOffline: vi.fn(),
+      preparePendingResidentForMigration: stopped,
+      onPendingResidentMigrationDeferred: deferred,
+    });
+    manager.resumePendingResidentsOffline();
+    await manager.reconcilePendingRootNamespaces(true);
+    expect(stopped).toHaveBeenCalledOnce();
+    expect(deferred).toHaveBeenCalledWith('hello');
+    expect(manager.list()[0]?.namespaceMigration).toBe('pending');
+    expect(manager.list()[0]?.namespace).toBeUndefined();
+  });
+
+  it('retries after in-flight work finishes, then stops, stamps, and restarts the offline resident', async () => {
+    await plantLegacyInstall('hello');
+    vi.useFakeTimers();
+    try {
+      let inFlight = true;
+      let runtimeBusy = false;
+      let retry: Promise<void> | undefined;
+      const events: string[] = [];
+      const stop = vi.fn(async () => {
+        if (inFlight) return false;
+        runtimeBusy = false;
+        events.push('stopped');
+        return true;
+      });
+      manager = new GhostManager({
+        getRootDir: () => rootDir,
+        classifyPendingNamespace: () => ({ kind: 'commit', namespace: 'acme', basis: 'market-organization' }),
+        isNamespaceMigrationBusy: () => inFlight || runtimeBusy,
+        canResumePendingResidentOffline: () => true,
+        onResumePendingResidentOffline: () => { runtimeBusy = true; events.push('started'); },
+        preparePendingResidentForMigration: stop,
+        onPendingResidentMigrationDeferred: () => {
+          setTimeout(() => { retry = manager.reconcilePendingRootNamespaces(true); }, 1000);
+        },
+        beforeNamespaceCommit: () => events.push('stamped'),
+        onNamespaceCommitted: () => events.push('restarted'),
+      });
+      manager.resumePendingResidentsOffline();
+      await manager.reconcilePendingRootNamespaces(true);
+      expect(events).toEqual(['started']);
+      expect(manager.list()[0]?.namespaceMigration).toBe('pending');
+      inFlight = false;
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(retry).toBeDefined();
+      await retry;
+      expect(stop).toHaveBeenCalledTimes(2);
+      expect(events).toEqual(['started', 'stopped', 'stamped', 'restarted']);
+      expect(manager.list()[0]?.namespace).toBe('acme');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('abandons an offline migration if its owner changes during safe stop', async () => {
+    await plantLegacyInstall('hello');
+    let owner = 'original';
+    let releaseStop: (() => void) | undefined;
+    const stopping = new Promise<void>((resolve) => { releaseStop = resolve; });
+    const committed = vi.fn();
+    manager = new GhostManager({
+      getRootDir: () => rootDir,
+      getOwnerContextKey: () => owner,
+      classifyPendingNamespace: () => ({ kind: 'commit', namespace: 'acme', basis: 'market-organization' }),
+      canResumePendingResidentOffline: () => true,
+      onResumePendingResidentOffline: vi.fn(),
+      preparePendingResidentForMigration: async () => { await stopping; return true; },
+      onNamespaceCommitted: committed,
+    });
+    manager.resumePendingResidentsOffline();
+    const migration = manager.reconcilePendingRootNamespaces(true);
+    owner = 'replacement';
+    releaseStop?.();
+    await migration;
+    expect(committed).not.toHaveBeenCalled();
+    expect(manager.list()[0]?.namespaceMigration).toBe('pending');
+  });
+
+  it('does not publish a namespace commit when its owner changes while writing the receipt', async () => {
+    await plantLegacyInstall('hello');
+    let owner = 'original';
+    let releaseWrite: (() => void) | undefined;
+    let writeStarted: (() => void) | undefined;
+    const writing = new Promise<void>((resolve) => { writeStarted = resolve; });
+    const blocked = new Promise<void>((resolve) => { releaseWrite = resolve; });
+    const write = vi.spyOn(GhostInstallReceiptStore.prototype, 'write').mockImplementation(async () => {
+      writeStarted?.();
+      await blocked;
+    });
+    const committed = vi.fn();
+    try {
+      manager = new GhostManager({
+        getRootDir: () => rootDir,
+        getOwnerContextKey: () => owner,
+        onNamespaceCommitted: committed,
+      });
+      manager.list();
+      const migration = manager.commitPendingNamespace('hello', 'acme', 'market-organization');
+      await writing;
+      owner = 'replacement';
+      releaseWrite?.();
+      await expect(migration).rejects.toThrow('owner changed');
+      expect(committed).not.toHaveBeenCalled();
+      expect(manager.list()[0]?.namespaceMigration).toBe('pending');
+    } finally {
+      write.mockRestore();
+    }
+  });
+
+  it('stops offline residency when the market responds but the organization slug is not yet known', async () => {
+    await plantLegacyInstall('hello');
+    let slugKnown = false;
+    let busy = false;
+    const stopped = vi.fn(async () => { busy = false; return true; });
+    manager = new GhostManager({
+      getRootDir: () => rootDir,
+      classifyPendingNamespace: () => slugKnown
+        ? { kind: 'commit', namespace: 'acme', basis: 'market-organization' }
+        : { kind: 'pending', reason: 'awaiting-organization-namespace' },
+      isNamespaceMigrationBusy: () => busy,
+      canResumePendingResidentOffline: () => true,
+      onResumePendingResidentOffline: () => { busy = true; },
+      preparePendingResidentForMigration: stopped,
+    });
+    manager.resumePendingResidentsOffline();
+    await manager.reconcilePendingRootNamespaces(true);
+    expect(stopped).toHaveBeenCalledOnce();
+    expect(manager.list()[0]?.namespaceMigration).toBe('pending');
+    slugKnown = true;
+    await manager.reconcilePendingRootNamespaces(true);
+    expect(manager.list()[0]?.namespace).toBe('acme');
   });
 
   it('waits for a failed market read before committing an old organization install', async () => {

@@ -458,7 +458,9 @@ export class BotAuthorizationService {
         assertCurrent();
       },
     };
-    const key = `${entry.card.target.kind}:${entry.card.target.id}:${action.id}:${getRemoteOauthContext()?.scope ?? 'local'}`;
+    const key = JSON.stringify([entry.card.target.kind, entry.card.target.id,
+      entry.card.target.kind === 'plugin' ? entry.card.target.namespace : undefined,
+      action.id, getRemoteOauthContext()?.scope ?? 'local']);
     let flight = this.oauthFlights.get(key);
     if (!flight) {
       const listeners = new Set<(url: string) => void>([onUrl]);

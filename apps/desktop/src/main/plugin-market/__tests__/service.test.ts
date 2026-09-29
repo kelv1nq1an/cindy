@@ -36,6 +36,7 @@ const runtime = vi.hoisted(() => ({
   generatedInstallDirs: [] as string[],
   installOrigins: new Map<string, 'manual' | 'agent-forge'>(),
   installOriginError: false,
+  resumeOfflineResidents: vi.fn(),
   currentOrganization: null as {
     organizationId: string;
     pluginPrefix: string | null;
@@ -83,6 +84,7 @@ vi.mock('../../logger.js', () => ({
 }));
 vi.mock('../../cindy-brain/index.js', () => ({
   getGhostManager: () => ({
+    resumePendingResidentsOffline: runtime.resumeOfflineResidents,
     list: () =>
       runtime.ghosts.map((ghost) => {
         // Historical service tests used a production-looking placeholder path.
@@ -241,6 +243,7 @@ afterEach(() => {
   }
   runtime.installOrigins.clear();
   runtime.installOriginError = false;
+  runtime.resumeOfflineResidents.mockClear();
   runtime.currentOrganization = null;
   runtime.boundaryPending = false;
   runtime.approvedInstallEvidence.mockReset();
@@ -465,6 +468,19 @@ function mockUninstallDropsGhost(failFor?: string): void {
 }
 
 describe('PluginMarketService migration and defaultInstall', () => {
+  it('resumes eligible pending residents only when market discovery is unavailable', async () => {
+    const h = harness([]);
+    h.api.listAll.mockRejectedValueOnce(new Error('market offline'));
+    await h.service.snapshot();
+    expect(runtime.resumeOfflineResidents).toHaveBeenCalledOnce();
+    await h.service.snapshot();
+    expect(runtime.resumeOfflineResidents).toHaveBeenCalledOnce();
+    runtime.pluginApiBaseUrl = null;
+    await h.service.snapshot({ discoveryOnly: true });
+    expect(runtime.resumeOfflineResidents).toHaveBeenCalledOnce();
+    await h.service.snapshot();
+    expect(runtime.resumeOfflineResidents).toHaveBeenCalledTimes(2);
+  });
   it('backfills the exact raw identity for an unchanged v0.1.61 v2 card record', async () => {
     const rawManifest = {
       schemaVersion: 2 as const,
@@ -1878,6 +1894,30 @@ describe('PluginMarketService migration and defaultInstall', () => {
       consent: { mode: 'confirmed', key: expect.any(String) },
       afterCommitInLock: expect.any(Function),
     });
+  });
+
+  it('organization cindy-github cannot receive root official trust', async () => {
+    const github = summary({
+      ghostId: 'cindy-github', scope: 'organization', organizationId: 'org-1', namespace: 'acme',
+    });
+    runtime.install.mockResolvedValue({
+      manifest: manifest('cindy-github'), namespace: 'acme',
+      dir: '/userData/cindy-brain/_ns/acme/cindy-github', enabled: true,
+    });
+    const h = harness([github]);
+    await h.service.install(github.id, reviewedInstallOptions(github), TEST_INSTALL_CONTEXT);
+    expect(runtime.install.mock.calls[0]?.[1]).not.toHaveProperty('officialCindyGithub');
+  });
+
+  it('explicit root public cindy-github keeps its official trust', async () => {
+    const github = summary({ ghostId: 'cindy-github', namespace: null });
+    runtime.install.mockResolvedValue({
+      manifest: manifest('cindy-github'), namespace: null,
+      dir: '/userData/cindy-brain/cindy-github', enabled: true,
+    });
+    const h = harness([github]);
+    await h.service.install(github.id, reviewedInstallOptions(github), TEST_INSTALL_CONTEXT);
+    expect(runtime.install.mock.calls[0]?.[1]).toMatchObject({ officialCindyGithub: true });
   });
 
   it('writes the v0.1.61 digest for a newly installed v2 card package', async () => {
@@ -4290,6 +4330,44 @@ function installRuntimeGhost(
 }
 
 describe('organization default Plugin takeover', () => {
+  it('installs a namespaced organization default despite a root tombstone and public same-id listing', async () => {
+    setCurrentOrganization();
+    const item = organizationDefaultSummary({ namespace: 'acme' });
+    const publicItem = summary({ id: 'c' + 'f'.repeat(24), ghostId: item.ghostId });
+    runtime.builtinRemoved.add(item.ghostId);
+    runtime.install.mockResolvedValue({
+      manifest: manifest(item.ghostId), namespace: 'acme',
+      dir: '/userData/cindy-brain/_ns/acme/acme-tool', enabled: true,
+    });
+    const h = harness([item, publicItem]);
+    await h.service.snapshot();
+    expect(runtime.install).toHaveBeenCalledWith(
+      expect.any(String), expect.objectContaining({ namespace: 'acme', ghostId: item.ghostId }),
+    );
+  });
+
+  it('keeps an explicit root default uninstall suppressed by the root tombstone', async () => {
+    const item = summary({ ghostId: 'cindy-art', namespace: null, defaultInstall: true });
+    runtime.builtinRemoved.add(item.ghostId);
+    const h = harness([item]);
+    await h.service.snapshot();
+    expect(runtime.install).not.toHaveBeenCalled();
+  });
+
+  it('allows a namespaced approved manual takeover even if a public entry shares the id', () => {
+    const item = organizationDefaultSummary({ namespace: 'acme' });
+    const installed = {
+      manifest: manifest(item.ghostId), namespace: 'acme', dir: '/unused', enabled: true,
+      approval: { state: 'approved', revision: '00000000-0000-4000-8000-000000000001' },
+      trust: { level: 'unverified', publisherSigned: false, publisherVerified: false, reviewed: false },
+    } satisfies InstalledGhost;
+    expect(organizationDefaultTakeoverEligibility({
+      summary: item, currentOrganization: { organizationId: 'org-1', pluginPrefix: 'acme' },
+      uniqueGhostId: false, installed, record: null, installOrigin: 'manual',
+      runtimeAvailable: true, optedOut: false, builtinRemoved: true, busy: false,
+    })).toEqual({ eligible: true });
+  });
+
   it('re-downloads and replaces a same-release bad target record without writing opt-out', async () => {
     setCurrentOrganization();
     const item = organizationDefaultSummary();

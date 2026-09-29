@@ -81,6 +81,7 @@ import {
   type NamespaceMigrationStore,
 } from './ghostNamespaceMigration.js';
 import {
+  assertManagedPluginParentSync,
   createGhostInstallReceipt,
   effectiveInstallOrigin,
   GhostInstallReceiptStore,
@@ -252,8 +253,13 @@ export interface GhostManagerOptions {
   ) => NamespaceClassification;
   /** True when runtime/OAuth/install work should delay a first-time namespace stamp. */
   isNamespaceMigrationBusy?: (ghostId: string) => boolean;
+  canResumePendingResidentOffline?: (ghostId: string) => boolean;
+  onResumePendingResidentOffline?: (ghost: InstalledGhost) => void;
+  preparePendingResidentForMigration?: (ghostId: string) => Promise<boolean>;
+  onPendingResidentMigrationDeferred?: (ghostId: string) => void;
   /** Best-effort side effect after receipt + census ledger commit. */
   onNamespaceCommitted?: (ghostId: string, namespace: string | null) => void;
+  beforeNamespaceCommit?: (ghostId: string, namespace: string | null) => void;
   /** Stop runtime/broker for the physical instance before its directory is renamed. */
   onBeforePhysicalRelocate?: (fromRelId: string) => void | Promise<void>;
   onValidatePhysicalRelocation?: (fromRelId: string, toRelId: string) => void | Promise<void>;
@@ -795,13 +801,47 @@ export class GhostManager {
   async reconcilePendingRootNamespaces(marketSyncCompleted: boolean): Promise<void> {
     const ledger = this.ensureNamespaceMigrationCensus();
     if (!ledger) return;
+    const ownerContextKey = this.currentOwnerContextKey();
     for (const ghostId of pendingNamespaceGhostIds(ledger)) {
+      if (this.currentOwnerContextKey() !== ownerContextKey) return;
+      if (marketSyncCompleted) {
+        const ready = await this.options.preparePendingResidentForMigration?.(ghostId);
+        if (this.currentOwnerContextKey() !== ownerContextKey) return;
+        if (ready === false) {
+          this.options.onPendingResidentMigrationDeferred?.(ghostId);
+          continue;
+        }
+      }
       const classification = this.options.classifyPendingNamespace?.(ghostId, marketSyncCompleted) ?? {
         kind: 'pending' as const,
         reason: 'awaiting-market-facts',
       };
       if (classification.kind === 'commit') {
-        await this.commitPendingNamespace(ghostId, classification.namespace, classification.basis);
+        const result = await this.commitPendingNamespace(
+          ghostId, classification.namespace, classification.basis,
+        );
+        if (!result.ok && result.reason === 'busy' && marketSyncCompleted) {
+          this.options.onPendingResidentMigrationDeferred?.(ghostId);
+        }
+      }
+    }
+  }
+
+  resumePendingResidentsOffline(): void {
+    const ledger = this.ensureNamespaceMigrationCensus();
+    if (!ledger || !this.options.canResumePendingResidentOffline ||
+        !this.options.onResumePendingResidentOffline) return;
+    const ghosts = this.list();
+    for (const ghostId of pendingNamespaceGhostIds(ledger)) {
+      const ghost = ghosts.find((candidate) =>
+        candidate.manifest.id === ghostId && candidate.dir === this.contentPath(ghostId) &&
+        candidate.namespaceMigration === 'pending' && candidate.enabled &&
+        candidate.approval.state === 'approved');
+      if (!ghost || this.hasPendingMutationJournal(ghostId)) continue;
+      const approval = this.readApproval(ghostId);
+      if (approval.state !== 'approved' || hasDeliveryNamespace(approval.receipt)) continue;
+      if (this.options.canResumePendingResidentOffline(ghostId)) {
+        this.options.onResumePendingResidentOffline(ghost);
       }
     }
   }
@@ -828,6 +868,7 @@ export class GhostManager {
     namespace: string | null,
     basis: NamespaceMigrationBasis,
   ): Promise<{ ok: true } | { ok: false; reason: string }> {
+    const ownerContextKey = this.currentOwnerContextKey();
     if (!isValidGhostId(ghostId)) return { ok: false, reason: 'invalid ghost id' };
     if (namespace !== null && !isValidPluginNamespace(namespace)) {
       return { ok: false, reason: 'invalid namespace' };
@@ -850,12 +891,16 @@ export class GhostManager {
       requested: { namespace, basis },
     });
     if (plan.kind === 'skip') return { ok: false, reason: plan.reason };
+    this.options.beforeNamespaceCommit?.(ghostId, plan.namespace);
     if (plan.kind === 'write-receipt-and-ledger') {
       if (approval.state !== 'approved') return { ok: false, reason: 'busy' };
       await this.receiptStore.write(
         { ...approval.receipt, namespace: plan.namespace },
         { skillSourceDir: this.contentPath(ghostId), requireSkillSnapshot: false, relId: ghostId },
       );
+    }
+    if (this.currentOwnerContextKey() !== ownerContextKey) {
+      throw new Error('ghost owner changed while committing a namespace migration');
     }
     this.options.onNamespaceCommitted?.(ghostId, plan.namespace);
     this.namespaceMigrationStore().write(
@@ -1310,7 +1355,7 @@ export class GhostManager {
       const siblings = backups.filter((other) => relIdFromUpdatingBackupName(other.name) === id);
       let finalKind: GhostDirEntryKind | 'missing';
       try {
-        finalKind = classifyGhostDirEntrySync(finalDir);
+        finalKind = this.recoveryEntryKind(finalDir);
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
           finalKind = 'missing';
@@ -1514,6 +1559,7 @@ export class GhostManager {
 
   private isRealDirChild(root: string, id: string): boolean {
     try {
+      if (!assertManagedPluginParentSync(root, id)) return false;
       return classifyGhostDirEntrySync(path.join(root, ...id.split('/'))) === 'directory';
     } catch {
       return false;
@@ -1523,6 +1569,9 @@ export class GhostManager {
   /** Recovery distinguishes a missing path from transiently unreadable state. */
   private recoveryEntryKind(absPath: string): GhostDirEntryKind | 'missing' {
     try {
+      const root = this.contentRootDir();
+      const relPath = path.relative(root, absPath).split(path.sep).join('/');
+      if (!assertManagedPluginParentSync(root, relPath)) return 'missing';
       return classifyGhostDirEntrySync(absPath);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 'missing';

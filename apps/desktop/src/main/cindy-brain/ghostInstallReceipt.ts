@@ -48,6 +48,36 @@ const MAX_RECEIPT_BYTES = 2 * 1024 * 1024;
 const MAX_PENDING_MUTATION_BYTES = 64 * 1024;
 const MAX_ICON_DATA_URL_BYTES = 768 * 1024;
 const MAX_MIGRATION_LEDGER_BYTES = 64 * 1024;
+
+export function assertManagedPluginParentSync(
+  root: string,
+  relPath: string,
+  createMissing = false,
+): boolean {
+  const segments = relPath.split('/');
+  if (segments.some((segment) => !segment || segment === '.' || segment === '..' ||
+      segment.includes('\\') || segment.includes(path.sep))) {
+    throw new Error('invalid managed plugin path');
+  }
+  let parent = root;
+  for (const segment of segments.slice(0, -1)) {
+    parent = path.join(parent, segment);
+    try {
+      const kind = classifyGhostDirEntrySync(parent);
+      if (kind !== 'directory') throw new Error('managed plugin parent is not a real directory');
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      if (!createMissing) return false;
+      try {
+        fs.mkdirSync(parent);
+      } catch (mkdirError) {
+        if ((mkdirError as NodeJS.ErrnoException).code !== 'EEXIST' ||
+            classifyGhostDirEntrySync(parent) !== 'directory') throw mkdirError;
+      }
+    }
+  }
+  return true;
+}
 /**
  * 受管 icon 快照的完整形态:声明的图片 mime + 严格 base64 载荷。载荷字符集也要
  * 校验 —— 只认前缀会让被改写的 receipt 把任意字符串塞进 renderer 的 img src。
@@ -207,6 +237,15 @@ export class GhostInstallReceiptStore {
     return path.resolve(this.getRootDir());
   }
 
+  private assertPathParentSync(absPath: string, createMissing = false): boolean {
+    const root = this.rootDir();
+    return assertManagedPluginParentSync(
+      root,
+      path.relative(root, absPath).split(path.sep).join('/'),
+      createMissing,
+    );
+  }
+
   private receiptRelId(receipt: { id: string; namespace?: string | null }): string {
     return pluginInstallRelId(
       createPluginLogicalIdentity(
@@ -232,6 +271,9 @@ export class GhostInstallReceiptStore {
     const receiptPath = this.receiptPath(id);
     let bytes: Buffer | null;
     try {
+      if (!this.assertPathParentSync(receiptPath)) {
+        return { state: 'missing' };
+      }
       bytes = readBoundedFileNoFollowSync(receiptPath, MAX_RECEIPT_BYTES, {
         containWithin: this.realRootDirSync(),
       });
@@ -283,7 +325,8 @@ export class GhostInstallReceiptStore {
       throw new Error('ghost receipt relId does not match receipt id');
     }
     const receiptFile = this.receiptPath(relId);
-    await fs.promises.mkdir(path.dirname(receiptFile), { recursive: true });
+    fs.mkdirSync(root, { recursive: true });
+    this.assertPathParentSync(receiptFile, true);
     try {
       await this.ensureSkillSnapshot(receipt, relId, options.skillSourceDir);
     } catch (error) {
@@ -333,6 +376,7 @@ export class GhostInstallReceiptStore {
 
   async remove(id: string): Promise<void> {
     const receiptPath = this.receiptPath(id);
+    if (!this.assertPathParentSync(receiptPath)) return;
     const receiptKind = await classifyCleanupEntry(receiptPath);
     if (receiptKind === 'missing') {
       // ENOENT is already-clean and must remain idempotent.
@@ -363,6 +407,7 @@ export class GhostInstallReceiptStore {
   /** `remove` 的同步版:启动恢复(构造期同步)收尾未完成卸载用,判据同 `remove`。 */
   removeSync(id: string): void {
     const receiptPath = this.receiptPath(id);
+    if (!this.assertPathParentSync(receiptPath)) return;
     const receiptKind = classifyCleanupEntrySync(receiptPath);
     if (receiptKind === 'missing') {
       // ENOENT is already-clean and must remain idempotent.
@@ -693,7 +738,8 @@ export class GhostInstallReceiptStore {
   async writePendingMutation(id: string, entry: GhostPendingMutation): Promise<void> {
     const root = this.rootDir();
     const target = this.pendingMutationPath(id);
-    await fs.promises.mkdir(path.dirname(target), { recursive: true });
+    fs.mkdirSync(root, { recursive: true });
+    this.assertPathParentSync(target, true);
     const temp = path.join(
       root,
       `.pending-${id.replaceAll('/', '.')}-${process.pid}-${crypto.randomBytes(6).toString('hex')}.tmp`,
@@ -712,12 +758,18 @@ export class GhostInstallReceiptStore {
 
   /** 事务提交:receipt 写成功后清标记。删不动只多留一份标记,下轮恢复幂等重判。 */
   async clearPendingMutation(id: string): Promise<void> {
-    await fs.promises.rm(this.pendingMutationPath(id), { force: true });
+    const target = this.pendingMutationPath(id);
+    if (this.assertPathParentSync(target)) {
+      await fs.promises.rm(target, { force: true });
+    }
   }
 
   /** 同步清标记(启动恢复在构造期同步跑,不能留 fire-and-forget 的异步删除)。 */
   clearPendingMutationSync(id: string): void {
-    fs.rmSync(this.pendingMutationPath(id), { force: true });
+    const target = this.pendingMutationPath(id);
+    if (this.assertPathParentSync(target)) {
+      fs.rmSync(target, { force: true });
+    }
   }
 
   readPendingMutationSync(id: string): GhostPendingMutationReadResult {
@@ -725,6 +777,9 @@ export class GhostInstallReceiptStore {
     const markerPath = this.pendingMutationPath(id);
     let bytes: Buffer | null;
     try {
+      if (!this.assertPathParentSync(markerPath)) {
+        return { state: 'missing' };
+      }
       // Single-handle bounded read: the earlier lstat+readFileSync pair had a
       // TOCTOU window where a FIFO/symlink/huge file could replace the journal
       // between the two calls.  readBoundedFileNoFollowSync opens, stats, and

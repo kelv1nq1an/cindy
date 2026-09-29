@@ -1748,8 +1748,28 @@ export function getGhostManager(): GhostManager {
       classifyPendingNamespace: (ghostId, marketSyncCompleted) =>
         classifyPendingNamespaceForGhost(ghostId, marketSyncCompleted === true),
       isNamespaceMigrationBusy: (ghostId) => isNamespaceMigrationBusy(ghostId),
+      canResumePendingResidentOffline: (ghostId) => canResumePendingResidentOffline(ghostId),
+      onResumePendingResidentOffline: (ghost) => {
+        if (!isGhostAvailableForActiveSession(ghost.manifest.id)) return;
+        offlineResidentIdsForActiveScope().add(ghost.manifest.id);
+        spawnIfResident(ghost, true);
+      },
+      preparePendingResidentForMigration: (ghostId) =>
+        preparePendingResidentForMigration(ghostId),
+      onPendingResidentMigrationDeferred: (ghostId) =>
+        schedulePendingResidentMigrationRetry(ghostId),
+      beforeNamespaceCommit: (ghostId, namespace) => {
+        const marketLedger = getPluginMarketLedger();
+        if (!marketLedger.stampNamespaceIfAbsent(ghostId, namespace) &&
+            marketLedger.hasInstalledRecordForGhostId(ghostId)) {
+          throw new Error('Plugin market namespace migration could not stamp the installed record');
+        }
+      },
       onNamespaceCommitted: (ghostId, namespace) => {
-        getPluginMarketLedger().stampNamespaceIfAbsent(ghostId, namespace);
+        offlineResidentIdsForActiveScope().delete(ghostId);
+        const retryTimer = pendingResidentMigrationRetryTimers.get(ghostId);
+        if (retryTimer) clearTimeout(retryTimer);
+        pendingResidentMigrationRetryTimers.delete(ghostId);
         const ownerKey = activeOwnerScopeKey();
         queueMicrotask(() => {
           if (activeOwnerScopeKey() !== ownerKey) return;
@@ -2979,6 +2999,41 @@ function getPluginMarketLedger(): PluginMarketLedger {
   return pluginMarketLedgerSingleton;
 }
 
+let offlineResidentScopeKey: string | null = null;
+const offlineResidentIds = new Set<string>();
+const pendingResidentMigrationRetryTimers = new Map<string, NodeJS.Timeout>();
+
+function offlineResidentIdsForActiveScope(): Set<string> {
+  const scopeKey = activeOwnerScopeKey();
+  if (offlineResidentScopeKey !== scopeKey) {
+    for (const timer of pendingResidentMigrationRetryTimers.values()) clearTimeout(timer);
+    pendingResidentMigrationRetryTimers.clear();
+    offlineResidentIds.clear();
+    offlineResidentScopeKey = scopeKey;
+  }
+  return offlineResidentIds;
+}
+
+function schedulePendingResidentMigrationRetry(ghostId: string): void {
+  if (!offlineResidentIdsForActiveScope().has(ghostId) ||
+      pendingResidentMigrationRetryTimers.has(ghostId)) return;
+  const ownerScopeKey = activeOwnerScopeKey();
+  const timer = setTimeout(() => {
+    if (pendingResidentMigrationRetryTimers.get(ghostId) !== timer) return;
+    pendingResidentMigrationRetryTimers.delete(ghostId);
+    if (activeOwnerScopeKey() !== ownerScopeKey ||
+        !offlineResidentIdsForActiveScope().has(ghostId)) return;
+    void getGhostManager().reconcilePendingRootNamespaces(true).catch((error) => {
+      log.warn('offline resident namespace migration retry failed', {
+        ghostId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
+  }, 1000);
+  timer.unref();
+  pendingResidentMigrationRetryTimers.set(ghostId, timer);
+}
+
 function isNamespaceMigrationBusy(ghostId: string): boolean {
   if (isAppSessionBoundaryPending()) return true;
   try {
@@ -2986,12 +3041,48 @@ function isNamespaceMigrationBusy(ghostId: string): boolean {
   } catch {
     return true;
   }
+  if (hasPendingGhostCalls(ghostId) || hasRunningGhostErrand(ghostId) ||
+      hasRunningGhostCindyWork(ghostId)) return true;
   const ghost = getGhostManager()
     .list()
     .find((candidate) => installedGhostPhysicalRelId(candidate) === ghostId);
-  if (!ghost || !runtimeSingleton) return false;
-  const state = runtimeSingleton.stateOf(installedGhostRuntimeId(ghost));
-  return state === 'starting' || state === 'running' || state === 'stopping';
+  if (!ghost) return false;
+  const runtimeId = installedGhostRuntimeId(ghost);
+  const state = runtimeSingleton?.stateOf(runtimeId);
+  return state === 'starting' || state === 'running' || state === 'stopping' ||
+    nodeRuntimeBrokerSingleton?.stateOf(runtimeId) === 'running';
+}
+
+function canResumePendingResidentOffline(ghostId: string): boolean {
+  if (isAppSessionBoundaryPending()) return false;
+  const record = readNamespaceMigrationMarketRecord(() =>
+    getPluginMarketLedger().installationsForGhost(ghostId));
+  return record === null && readNamespaceMigrationInstallOrigin(() =>
+    getGhostManager().readApprovedInstallOriginStrict(ghostId)) === 'manual';
+}
+
+async function preparePendingResidentForMigration(ghostId: string): Promise<boolean> {
+  if (isAppSessionBoundaryPending()) return false;
+  if (!offlineResidentIdsForActiveScope().has(ghostId)) return true;
+  const ownerScopeKey = activeOwnerScopeKey();
+  if (hasPendingGhostCalls(ghostId) || hasRunningGhostErrand(ghostId) ||
+      hasRunningGhostCindyWork(ghostId)) return false;
+  try {
+    if (fs.existsSync(ghostOauthMutationLockPath(ghostId))) return false;
+  } catch {
+    return false;
+  }
+  const ghost = getGhostManager().list().find((candidate) =>
+    candidate.namespaceMigration === 'pending' &&
+    installedGhostPhysicalRelId(candidate) === ghostId);
+  if (!ghost) return false;
+  const runtimeId = installedGhostRuntimeId(ghost);
+  getGhostRuntime().stop(runtimeId);
+  await getGhostNodeRuntimeBroker().stopAndWait(runtimeId);
+  if (activeOwnerScopeKey() !== ownerScopeKey || isAppSessionBoundaryPending()) {
+    throw new Error('ghost owner changed while stopping an offline resident');
+  }
+  return true;
 }
 
 function classifyPendingNamespaceForGhost(
@@ -6743,7 +6834,8 @@ async function installOrUpdateMarketGhostPackageLocked(
       throwIpcError('GHOST_FILE_INVALID', '下载包清单与市场 Release 不一致');
     }
     const trustOverride: GhostHostTrustOverride | undefined =
-      expected.officialCindyGithub === true && expected.ghostId === 'cindy-github'
+      expected.officialCindyGithub === true && expected.ghostId === 'cindy-github' &&
+      expected.namespace == null
         ? 'cindy-official'
         : undefined;
     requireGhostAvailableForActiveSession(expected.ghostId);
@@ -7097,9 +7189,10 @@ export function isBuiltinGhostRemovedByUser(id: string): boolean {
  * "该在场了"时机的统一入口(应用启动扫描 / 装入即开 / 唤醒 / 更新换代后)。
  * spawn 幂等,重复调用零成本;失败走熔断记账,不抛出(fire-and-forget)。
  */
-function spawnIfResident(ghost: InstalledGhost): void {
+function spawnIfResident(ghost: InstalledGhost, allowPendingLegacy = false): void {
   spawnResidentGhost(ghost, {
     isAvailable: isGhostAvailableForActiveSession,
+    allowPendingLegacy,
     startNode: (installed) => getGhostNodeRuntimeBroker().startResident(installed),
     spawnBrowser: (installed) => getGhostRuntime().spawn(installed),
     warn: (message, fields) => log.warn(message, fields),

@@ -446,6 +446,28 @@ describe('authorization completion races', () => {
     expect(h.deps.resume).toHaveBeenCalledTimes(2);
     await h.service.dispose();
   });
+  it('does not share an OAuth flight between same-id plugins in different namespaces', async () => {
+    const h = harness();
+    const finish: Array<() => void> = [];
+    h.adapter.execute = vi.fn(async () => {
+      await new Promise<void>((resolve) => finish.push(resolve));
+      return { ok: true as const };
+    });
+    await h.service.request('s', { kind: 'plugin', id: 'p', namespace: null });
+    await h.service.request('s', { kind: 'plugin', id: 'p', namespace: 'acme' });
+    for (const card of h.stored.values()) {
+      await h.service.resolve(card.snapshot.requestId, {
+        kind: 'plugin_setup', action: 'run_action', actionId: 'connect',
+        expectedRevision: card.snapshot.revision,
+      }, h.sender);
+    }
+    await flush();
+    expect(h.adapter.execute).toHaveBeenCalledTimes(2);
+    h.setReady();
+    for (const settle of finish) settle();
+    await flush();
+    await h.service.dispose();
+  });
 });
 
 describe('authorization durable completion boundary', () => {

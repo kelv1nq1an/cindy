@@ -170,6 +170,16 @@ describe('ghost_card · in-flight 锚定', () => {
     });
   });
 
+  it('claims an encoded enterprise call without a toolUseId only for its matching live card', () => {
+    const call = { ...mkGhostCall('org', '_ns__acme__helper'), toolUseId: undefined };
+    const cards = itemsOf([call], snapshot({ 'org-card': readyEntry('_ns__acme__helper') }, [
+      live('org-card', { ghostId: '_ns__acme__helper' }),
+    ]));
+    expect(cards).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: 'ghost_card', ghostId: '_ns__acme__helper', callId: 'org-card' }),
+    ]));
+  });
+
   it('uses exact tool-use correlation for an in-place namespace stamp', () => {
     const call = { ...mkGhostCall('org', 'helper'), toolInput: { ghost_id: 'helper', namespace: 'acme', tool: 'run' } };
     const cards = itemsOf([call], snapshot({ 'org-card': readyEntry('helper') }, [

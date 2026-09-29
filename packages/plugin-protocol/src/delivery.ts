@@ -484,6 +484,21 @@ export function parseListPluginsResponse(value: unknown): ListPluginsResponse {
   const plugins = raw.plugins.map(parseVisiblePluginSummary);
   const removals = parseRemovals(raw.removals);
   const currentOrganization = parseCurrentOrganization(raw.currentOrganization);
+  assertPluginListOrganizationNamespace(currentOrganization, plugins, removals);
+  return {
+    schemaVersion: PLUGIN_API_SCHEMA_VERSION,
+    plugins,
+    nextCursor: nextCursor(raw.nextCursor, 'response.nextCursor'),
+    removals,
+    currentOrganization,
+  };
+}
+
+export function assertPluginListOrganizationNamespace(
+  currentOrganization: PluginCurrentOrganization | null,
+  plugins: readonly VisiblePluginSummary[],
+  removals: readonly PluginRemovalNotice[],
+): void {
   if (currentOrganization?.orgSlug !== undefined) {
     for (const item of [...plugins, ...removals]) {
       if (item.scope !== 'organization') continue;
@@ -496,13 +511,6 @@ export function parseListPluginsResponse(value: unknown): ListPluginsResponse {
       }
     }
   }
-  return {
-    schemaVersion: PLUGIN_API_SCHEMA_VERSION,
-    plugins,
-    nextCursor: nextCursor(raw.nextCursor, 'response.nextCursor'),
-    removals,
-    currentOrganization,
-  };
 }
 
 /**

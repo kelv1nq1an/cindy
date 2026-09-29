@@ -38,6 +38,13 @@ describe('collectGhostCallsByUserTurn', () => {
     expect([...(collectGhostCallsByUserTurn([user('u1'), legacy]).get('u1') ?? [])]).toEqual(['helper']);
     expect(collectGhostCallsByUserTurn([user('u1'), malformed]).has('u1')).toBe(false);
   });
+  it('attributes a valid encoded instance id without an extra namespace', () => {
+    const encoded = ghostCall('org', '_ns__acme__helper');
+    expect([...(collectGhostCallsByUserTurn([user('u1'), encoded]).get('u1') ?? [])])
+      .toEqual(['_ns__acme__helper']);
+    const invalid = { ...encoded, toolInput: { ghost_id: '_ns__acme__helper', namespace: 'globex', tool: 'run' } };
+    expect(collectGhostCallsByUserTurn([user('u1'), invalid]).has('u1')).toBe(false);
+  });
   it('把 ghost_call 归到其所在 turn 的 user 消息名下', () => {
     const map = collectGhostCallsByUserTurn([user('u1'), ghostCall('t1', 'art')]);
     expect([...(map.get('u1') ?? [])]).toEqual(['art']);

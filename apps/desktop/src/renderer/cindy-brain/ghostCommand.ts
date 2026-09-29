@@ -141,9 +141,10 @@ export interface GhostDirectiveSegment {
   injected: boolean;
 }
 
-const DIRECT_GHOST_TOOL_HINT =
+const PRE_ROOT_GHOST_TOOL_HINT =
   '插件本身不会作为独立 MCP server/resource 出现;ghost_call 的完整工具名是 mcp__cindy__ghost_call。' +
-  '不得查询 MCP resources、插件文件、ghost.json、宿主进程或本地 API,直接调用 cindy 总机工具。' +
+  '不得查询 MCP resources、插件文件、ghost.json、宿主进程或本地 API,直接调用 cindy 总机工具。';
+const DIRECT_GHOST_TOOL_HINT = PRE_ROOT_GHOST_TOOL_HINT +
   '若指令带 /@root，ghost_call 必须显式传 namespace:null。';
 
 /**
@@ -415,6 +416,14 @@ const COMMAND_DIRECTIVE_RE = new RegExp(
     .replace(P3, '(.+?)')})$`,
 );
 
+function preRootCommandRegex(pattern: RegExp): RegExp {
+  const rootHint = escapeRegExp(DIRECT_GHOST_TOOL_HINT.slice(PRE_ROOT_GHOST_TOOL_HINT.length))
+    .replaceAll('/', '\\/');
+  return new RegExp(pattern.source.replace(rootHint, ''));
+}
+
+const PRE_ROOT_COMMAND_DIRECTIVE_RE = preRootCommandRegex(COMMAND_DIRECTIVE_RE);
+
 /** 直达规则补强前的插件硬指令解析器。 */
 const PREVIOUS_PLUGIN_COMMAND_DIRECTIVE_RE = new RegExp(
   `\\n\\n(${escapeRegExp(buildPreviousPluginCommandDirective(P1, P2, P3))
@@ -442,6 +451,8 @@ const COMMAND_TOOLS_DIRECTIVE_RE = new RegExp(
     .replace(P3, '(.+?)')
     .replace(P4, '(.+)')})$`,
 );
+
+const PRE_ROOT_COMMAND_TOOLS_DIRECTIVE_RE = preRootCommandRegex(COMMAND_TOOLS_DIRECTIVE_RE);
 
 /** 直达规则补强前、带内嵌工具清单的插件硬指令解析器。 */
 const PREVIOUS_PLUGIN_COMMAND_TOOLS_DIRECTIVE_RE = new RegExp(
@@ -479,6 +490,7 @@ export function splitGhostDirective(
   // 新形态(内嵌工具清单)优先;两个 command 模板尾部文案不同,互不误伤。
   for (const pattern of [
     COMMAND_TOOLS_DIRECTIVE_RE,
+    PRE_ROOT_COMMAND_TOOLS_DIRECTIVE_RE,
     PREVIOUS_PLUGIN_COMMAND_TOOLS_DIRECTIVE_RE,
     LEGACY_COMMAND_TOOLS_DIRECTIVE_RE,
   ]) {
@@ -499,6 +511,7 @@ export function splitGhostDirective(
   }
   for (const pattern of [
     COMMAND_DIRECTIVE_RE,
+    PRE_ROOT_COMMAND_DIRECTIVE_RE,
     PREVIOUS_PLUGIN_COMMAND_DIRECTIVE_RE,
     LEGACY_COMMAND_DIRECTIVE_RE,
   ]) {

@@ -166,6 +166,17 @@ describe('语言提及软提示已移除(2026-07-14 定案:不再追加、不再
 });
 
 describe('splitGhostDirective(召唤卡片渲染层解析,与生成端同模板 round-trip)', () => {
+  it('parses the exact previously persisted direct-tool hint in both command forms', () => {
+    for (const tools of [undefined, [{ name: 'gen_image', description: 'x' }]]) {
+      const current = expandGhostCommand('$画图 一只猫', [
+        { ...ghost('画图'), manifest: { ...ghost('画图').manifest, tools } },
+      ]);
+      const prior = current.replace('若指令带 /@root，ghost_call 必须显式传 namespace:null。', '');
+      expect(prior).not.toBe(current);
+      expect(splitGhostDirective(prior)).toMatchObject({ body: '$画图 一只猫', directive: { kind: 'command', ghostId: 'art' } });
+      expect(splitGhostDirective(current)).toMatchObject({ body: '$画图 一只猫', directive: { kind: 'command', ghostId: 'art' } });
+    }
+  });
   it('硬指令 round-trip:expand → split 还原正文与结构化字段', () => {
     const text = '$画图 用nano 画一张 心动小镇';
     const out = expandGhostCommand(text, [ghost('画图')]);

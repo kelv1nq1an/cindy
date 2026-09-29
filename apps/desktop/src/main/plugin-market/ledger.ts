@@ -418,7 +418,7 @@ export class PluginMarketLedger {
   stampNamespaceIfAbsent(ghostId: string, namespace: string | null): boolean {
     if (namespace !== null && !isValidPluginNamespace(namespace)) return false;
     const data = this.read();
-    const current = uniqueRecordForGhostId(data.installations, ghostId);
+    const current = uniqueInstalledRecordForGhostId(data.installations, ghostId);
     if (!current) return false;
     if (Object.prototype.hasOwnProperty.call(current, 'namespace')) {
       return current.namespace === namespace;
@@ -426,6 +426,10 @@ export class PluginMarketLedger {
     this.replaceRecord(data, current, { ...current, namespace });
     this.write(data);
     return true;
+  }
+
+  hasInstalledRecordForGhostId(ghostId: string): boolean {
+    return recordsForGhostId(this.read().installations, ghostId).some((record) => record.installed);
   }
 
   /**

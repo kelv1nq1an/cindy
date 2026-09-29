@@ -119,7 +119,7 @@ import {
 import { SHARE_MESSAGE_ATTR, SHARE_SESSION_ATTR } from '@/lib/shareConversationImage';
 import { ShareMessageCheckbox } from './ShareMessageCheckbox';
 import { isShareableMessage, useShareSelectionActive } from './shareSelectionStore';
-import { pluginStoragePart } from '../../../shared/pluginIdentity';
+import { parsePluginInstanceId, pluginStoragePart } from '../../../shared/pluginIdentity';
 import { isValidGhostId } from '../../../shared/ghost';
 import { isValidPluginNamespace } from '@cindy/plugin-protocol';
 
@@ -1454,7 +1454,10 @@ function isRenderTurnBoundary(message: ChatMessage): boolean {
 }
 
 function ghostCardInstanceId(ghostId: string, namespace: unknown): string | null {
-  if (!isValidGhostId(ghostId)) return null;
+  if (!isValidGhostId(ghostId)) {
+    const identity = parsePluginInstanceId(ghostId);
+    return identity && namespace === undefined ? pluginStoragePart(identity) : null;
+  }
   if (namespace === null || namespace === undefined) return ghostId;
   return typeof namespace === 'string' && isValidPluginNamespace(namespace)
     ? pluginStoragePart({ namespace, ghostId })
