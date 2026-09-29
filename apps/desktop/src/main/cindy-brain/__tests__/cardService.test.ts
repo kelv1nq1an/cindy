@@ -51,6 +51,16 @@ const update = (callId: string, html = '<p>x</p>', extra: Record<string, unknown
 });
 
 describe('GhostCardService', () => {
+  it('broadcasts the trusted logical identity only for an in-place namespace install', () => {
+    const { svc, broadcast } = makeService();
+    svc.registerCall('org', { ghostId: 'helper', logicalGhostId: '_ns__acme__helper', toolUseId: null, sessionId: 's1' });
+    expect(svc.handleCardUpdate('helper', update('org')).accepted).toBe(true);
+    expect(broadcast).toHaveBeenCalledWith(expect.objectContaining({
+      ghostId: 'helper', logicalGhostId: '_ns__acme__helper',
+    }));
+    expect(svc.handleCardUpdate('_ns__acme__helper', update('org')).accepted).toBe(false);
+  });
+
   it('接受链路:sanitize 产物落库并推送,hasCard/finalize 语义正确', async () => {
     const { svc, persist, broadcast } = makeService();
     svc.registerCall('c1', { ghostId: 'g1', toolUseId: 'tu1', sessionId: 's1' });

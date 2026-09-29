@@ -175,6 +175,8 @@ import {
   electronSandboxAdapter,
   ensureGhostProtocolRegistered,
   revokeLegacyGhostProtocolPartition,
+  resumeGhostProtocolAfterRelocation,
+  suspendGhostProtocolForRelocation,
   ghostIdForLogicWebContents,
   sendToGhostLogic,
   setGhostAppContextProvider,
@@ -1799,6 +1801,7 @@ export function getGhostManager(): GhostManager {
       },
       onBeforePhysicalRelocate: async (fromRelId) => {
         const ghost = findGhostForInstanceId(fromRelId);
+        if (ghost) suspendGhostProtocolForRelocation(ghost);
         const parts = new Set<string>([fromRelId]);
         const fromIdentity = parsePluginInstallRelId(fromRelId) ?? parsePluginStoragePart(fromRelId);
         if (fromIdentity) parts.add(pluginStoragePart(fromIdentity));
@@ -1822,10 +1825,12 @@ export function getGhostManager(): GhostManager {
       },
       onPhysicalRelocateAborted: (fromRelId) => {
         const ghost = findGhostForInstanceId(fromRelId);
+        if (ghost) resumeGhostProtocolAfterRelocation(ghost);
         if (ghost) spawnIfResident(ghost);
       },
       onPhysicalRelocateCommitted: (toRelId) => {
         const ghost = findGhostForInstanceId(toRelId);
+        if (ghost) resumeGhostProtocolAfterRelocation(ghost);
         if (ghost) spawnIfResident(ghost);
         const identity = parsePluginInstallRelId(toRelId);
         if (identity && identity.namespace !== null) {

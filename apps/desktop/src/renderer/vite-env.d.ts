@@ -1487,6 +1487,7 @@ interface ElectronAPI {
       callback: (payload: {
         callId: string;
         ghostId: string;
+        logicalGhostId?: string;
         toolUseId: string | null;
         /** 静态版(settle 后 / 历史回放;与落库一致)。 */
         html: string;

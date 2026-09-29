@@ -234,7 +234,8 @@ export function setGhostConnectionsHandler(handler: GhostConnectionsProtocolHand
 /** 该分区是否已挂过协议 handler(session 分区随 app 生命周期,挂一次即可)。 */
 const partitionRegistered = new Set<string>();
 const revokedPartitions = new Set<string>();
-const partitionGhost = new Map<string, { dir: string; entry: string }>();
+const suspendedPartitions = new Set<string>();
+const partitionGhost = new Map<string, { dir: string; entry: string; storagePart: string }>();
 type GhostProtocolOwnerIdentity = Pick<ActiveAppSession, 'mode' | 'dataOwnerId'>;
 const partitionOwner = new Map<string, GhostProtocolOwnerIdentity>();
 
@@ -272,6 +273,21 @@ export function revokeLegacyGhostProtocolPartition(ghostId: string): void {
   if (partition) revokedPartitions.add(partition);
 }
 
+export function suspendGhostProtocolForRelocation(ghost: InstalledGhost): void {
+  const partition = ownerScopedGhostPartitionForInstalledGhost(ghost, getActiveAppSession());
+  if (partition) suspendedPartitions.add(partition);
+}
+
+export function resumeGhostProtocolAfterRelocation(ghost: InstalledGhost): void {
+  const owner = getActiveAppSession();
+  const partition = ownerScopedGhostPartitionForInstalledGhost(ghost, owner);
+  if (!partition) return;
+  if (partitionRegistered.has(partition)) {
+    registerGhostProtocol(partition, ghost, ghostProtocolOwnerSnapshot(owner));
+  }
+  suspendedPartitions.delete(partition);
+}
+
 /**
  * 意识页面(html 响应)统一佩戴的 CSP:脚本/样式/资源只许同源(= 自己的
  * 安装目录),img 额外放行 data:/blob:/https:(远程图片),media 额外放行
@@ -293,6 +309,7 @@ function registerGhostProtocol(
   partitionGhost.set(partition, {
     dir: ghost.dir,
     entry: ghost.manifest.entry,
+    storagePart: installedGhostStoragePart(ghost),
   });
   if (partitionRegistered.has(partition)) return;
   // 注意:登记发生在全部挂载成功之后(函数末尾)——session.fromPartition 在
@@ -300,7 +317,6 @@ function registerGhostProtocol(
   // 实际无 handler,面板与电子脑一起哑火(review P0 的中毒模式)。
   const ses = session.fromPartition(partition);
   const ghostId = ghost.manifest.id;
-  const storagePart = installedGhostStoragePart(ghost);
   // 每个 owner 都会得到新的内存 session；权限与下载必须显式拒绝，不能
   // 因为分区是新建的就依赖 Electron 默认行为。
   ses.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false));
@@ -326,12 +342,15 @@ function registerGhostProtocol(
       // owner B 提交后，owner A 的旧 guest 仍可能短暂存活并新发请求。
       // 在 URL 路由、body 读取和任何 provider 调用前拒绝旧 Session；已经
       // 进入 handler 的请求不在这里取消或排空。
-      if (revokedPartitions.has(partition) || !isGhostProtocolOwnerActive(owner)) {
+      if (revokedPartitions.has(partition) || suspendedPartitions.has(partition) || !isGhostProtocolOwnerActive(owner)) {
         return new Response(null, {
           status: 403,
           headers: { 'Cache-Control': 'no-store' },
         });
       }
+      const binding = partitionGhost.get(partition);
+      if (!binding) return new Response(null, { status: 403 });
+      const storagePart = binding.storagePart;
       const url = new URL(request.url);
       // 分区专属通道只认自己的 id,其它 host 一律 403(结构隔离的最后一道断言)。
       if (url.host !== ghostId) return new Response(null, { status: 403 });

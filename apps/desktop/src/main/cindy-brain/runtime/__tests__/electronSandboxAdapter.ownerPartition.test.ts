@@ -107,10 +107,12 @@ import {
   electronSandboxAdapter,
   ensureGhostProtocolRegistered,
   revokeLegacyGhostProtocolPartition,
+  resumeGhostProtocolAfterRelocation,
   setGhostAppContextProvider,
   setGhostAgentModelsProvider,
   setGhostKvStore,
   setGhostMediaModelsProvider,
+  suspendGhostProtocolForRelocation,
 } from '../electronSandboxAdapter';
 
 function ghost(id: string): InstalledGhost {
@@ -149,6 +151,46 @@ describe('electronSandboxAdapter owner partition', () => {
     expect(harness.sessions.has('cindy-ghost-owner:cloud:opaque-owner-a:shared')).toBe(false);
     ensureGhostProtocolRegistered({ ...ghost('shared'), namespace: null });
     expect(harness.sessions.size).toBe(2);
+  });
+
+  it('rebinds an organization protocol after its physical directory and data move', async () => {
+    const inPlace = { ...ghost('moved-shared'), namespace: 'acme' };
+    const partition = 'cindy-ghost-owner:cloud:opaque-owner-a:_ns__acme__moved-shared';
+    kvEndpoint.handleGhostKvRequest.mockReturnValue({ status: 200 });
+    setGhostKvStore({ read: vi.fn(() => ({})), write: vi.fn() });
+    ensureGhostProtocolRegistered(inPlace);
+    const handler = harness.sessions.get(partition)?.protocolHandler;
+    await handler?.(new Request('cindy-ghost://moved-shared/kv'));
+    expect(kvEndpoint.handleGhostKvRequest).toHaveBeenLastCalledWith(
+      expect.objectContaining({ ghostId: 'moved-shared' }),
+    );
+    suspendGhostProtocolForRelocation(inPlace);
+    expect((await handler?.(new Request('cindy-ghost://moved-shared/kv')))?.status).toBe(403);
+    ensureGhostProtocolRegistered({ ...inPlace, dir: '/plugins/_ns/acme/moved-shared' });
+    expect((await handler?.(new Request('cindy-ghost://moved-shared/kv')))?.status).toBe(403);
+    resumeGhostProtocolAfterRelocation({ ...inPlace, dir: '/plugins/_ns/acme/moved-shared' });
+    ensureGhostProtocolRegistered({ ...ghost('moved-shared'), namespace: null });
+    await handler?.(new Request('cindy-ghost://moved-shared/kv'));
+    expect(kvEndpoint.handleGhostKvRequest).toHaveBeenLastCalledWith(
+      expect.objectContaining({ ghostId: '_ns__acme__moved-shared' }),
+    );
+    expect(harness.sessions.get(partition)?.protocolHandle).toHaveBeenCalledTimes(1);
+  });
+
+  it('restores the original protocol binding when relocation is aborted', async () => {
+    const inPlace = { ...ghost('abort-shared'), namespace: 'acme' };
+    const partition = 'cindy-ghost-owner:cloud:opaque-owner-a:_ns__acme__abort-shared';
+    kvEndpoint.handleGhostKvRequest.mockReturnValue({ status: 200 });
+    setGhostKvStore({ read: vi.fn(() => ({})), write: vi.fn() });
+    ensureGhostProtocolRegistered(inPlace);
+    const handler = harness.sessions.get(partition)?.protocolHandler;
+    suspendGhostProtocolForRelocation(inPlace);
+    expect((await handler?.(new Request('cindy-ghost://abort-shared/kv')))?.status).toBe(403);
+    resumeGhostProtocolAfterRelocation(inPlace);
+    expect((await handler?.(new Request('cindy-ghost://abort-shared/kv')))?.status).toBe(200);
+    expect(kvEndpoint.handleGhostKvRequest).toHaveBeenLastCalledWith(
+      expect.objectContaining({ ghostId: 'abort-shared' }),
+    );
   });
 
   it('does not reuse a legacy root session after an organization stamp and root replacement', () => {

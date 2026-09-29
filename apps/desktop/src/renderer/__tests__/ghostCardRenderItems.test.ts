@@ -190,6 +190,20 @@ describe('ghost_card · in-flight 锚定', () => {
     });
   });
 
+  it('matches an in-place organization card without a tool-use id but never anchors it to root', () => {
+    const card = live('org-card', { ghostId: 'helper', logicalGhostId: '_ns__acme__helper' });
+    const cards = snapshot({ 'org-card': readyEntry('helper') }, [card]);
+    const organization = { ...mkGhostCall('org', 'helper'), toolUseId: undefined,
+      toolInput: { ghost_id: 'helper', namespace: 'acme', tool: 'run' } };
+    const root = { ...mkGhostCall('root', 'helper'), toolUseId: undefined,
+      toolInput: { ghost_id: 'helper', namespace: null, tool: 'run' } };
+    expect(itemsOf([organization], cards).find((item) => item.type === 'ghost_card'))
+      .toMatchObject({ callId: 'org-card', settled: false });
+    expect(itemsOf([root], cards).some((item) => item.type === 'ghost_card')).toBe(false);
+    const implicitRoot = { ...root, toolInput: { ghost_id: 'helper', tool: 'run' } };
+    expect(itemsOf([implicitRoot], cards).some((item) => item.type === 'ghost_card')).toBe(false);
+  });
+
   it('ignores malformed plugin ids instead of crashing the message stream', () => {
     const call = { ...mkGhostCall('invalid'), toolInput: { ghost_id: 'invalid id', namespace: 'acme', tool: 'run' } };
     const cards = itemsOf([call], snapshot({ 'org-card': readyEntry('_ns__acme__helper') }, [

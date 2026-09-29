@@ -98,6 +98,8 @@ export interface GhostCardRow {
 export interface GhostCardPush {
   callId: string;
   ghostId: string;
+  /** 物理键与逻辑身份不同时，供进行中调用按 namespace 精确配对。 */
+  logicalGhostId?: string;
   /** agent 侧 tool_use id(claude 路径有,codex 为 null → renderer 走启发式锚定)。 */
   toolUseId: string | null;
   /** 静态版(settle 后 / 历史回放用;与落库内容一致)。 */
@@ -151,6 +153,7 @@ const SWEEP_MIN_INTERVAL_MS = 30_000;
 
 interface CallEntry {
   ghostId: string;
+  logicalGhostId?: string;
   toolUseId: string | null;
   sessionId: string | null;
   sessionInstanceId?: string;
@@ -237,6 +240,7 @@ export class GhostCardService {
     callId: string,
     info: {
       ghostId: string;
+      logicalGhostId?: string;
       toolUseId: string | null;
       sessionId: string | null;
       sessionInstanceId?: string;
@@ -253,6 +257,7 @@ export class GhostCardService {
     this.sweep();
     this.calls.set(callId, {
       ghostId: info.ghostId,
+      ...(info.logicalGhostId !== undefined ? { logicalGhostId: info.logicalGhostId } : {}),
       toolUseId: info.toolUseId,
       sessionId: info.sessionId,
       sessionInstanceId: info.sessionInstanceId,
@@ -451,6 +456,7 @@ export class GhostCardService {
     this.deps.broadcast({
       callId: p.callId,
       ghostId: senderGhostId,
+      ...(entry.logicalGhostId !== undefined ? { logicalGhostId: entry.logicalGhostId } : {}),
       toolUseId: entry.toolUseId,
       html: sanitized.html,
       animatedHtml: sanitized.animatedHtml ?? null,

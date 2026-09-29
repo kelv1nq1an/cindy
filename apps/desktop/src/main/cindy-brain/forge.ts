@@ -4350,6 +4350,8 @@ if (!opened.ok) console.warn(opened.errorCode, opened.message);
 以下只解释存量包的兼容形态,用于维护与迁移,**不要照抄到新插件**。存量插件装入且
 启用后,主机仍会把每个技能目录链接进共享技能根
 \`~/.agents/skills/<插件id>--<技能name>\`(Windows 用 junction),停用/卸载即撤链。
+已知企业 namespace 的实例用 \`_ns__<namespace>__<插件id>--<技能name>\`，
+root 和存量未标记 namespace 的实例继续沿用旧链接名。
 
 目录形态(每条 item 一个目录,内必须有 SKILL.md):
 
