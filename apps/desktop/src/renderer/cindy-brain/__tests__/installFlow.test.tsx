@@ -115,6 +115,7 @@ describe('installFlow · 本地包安装', () => {
     expect(update).toHaveBeenCalledWith('/tmp/node.cindy', {
       expectedPackageSha256: 'a'.repeat(64),
       expectedInstalledApproval: 'approved:00000000-0000-4000-8000-000000000001',
+      expectedInstalledInstanceId: 'node-ghost',
     });
   });
 
