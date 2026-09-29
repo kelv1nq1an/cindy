@@ -626,7 +626,9 @@ export function GhostPluginPage({
   }, []);
   useEffect(() => {
     if (!recommendation) return;
-    const target = ghosts.find((g) => g.manifest.id === recommendation.suggestion.pluginId);
+    const target = recommendation.suggestion.pluginId
+      ? findInstalledGhostByInstanceId(ghosts, recommendation.suggestion.pluginId)
+      : undefined;
     handlePickScope(target?.enabled ? recommendation.workingDir : null);
   }, [recommendation?.nonce, handlePickScope]);
   const effectiveEnabled = useCallback(
@@ -1462,7 +1464,7 @@ export function GhostPluginPage({
           isStillActive: () => isMarketBusyLeaseActive(marketBusyLease),
         });
         if (!ghost || !isMarketBusyLeaseActive(marketBusyLease)) return;
-        if (continueRecommendation(pendingNonce, ghost.manifest.id)) return;
+        if (continueRecommendation(pendingNonce, installedGhostStoragePart(ghost))) return;
         // 市场首装装完即开(2026-07-26 定案),toast 用"已安装";更新路径如实
         // 用"已更新"(生效状态未被改变),并留在当前页方便连续更新多个插件。
         toast.success(

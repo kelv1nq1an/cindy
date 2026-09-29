@@ -2966,6 +2966,102 @@ describe('PluginMarketService migration and defaultInstall', () => {
     expect(runtime.busyQueryIds).not.toContain('helper');
   });
 
+  it('recognizes an in-place organization install when an older server omits namespace', async () => {
+    const item = summary({ ghostId: 'helper', scope: 'organization', organizationId: 'org-1' });
+    const installedManifest = manifest('helper');
+    const installRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cindy-legacy-organization-'));
+    roots.push(installRoot);
+    const installDir = path.join(installRoot, 'helper');
+    fs.mkdirSync(installDir);
+    fs.writeFileSync(path.join(installDir, 'ghost.json'), JSON.stringify(installedManifest));
+    runtime.ghosts = [{ manifest: installedManifest, dir: installDir, namespace: 'acme', enabled: true }];
+    const h = harness([item]);
+    h.ledger.upsertInstallation(recordForTest(item, {
+      namespace: 'acme',
+      manifestDigest: ghostManifestDigest(installedManifest),
+    }));
+
+    expect((await h.service.snapshot()).items[0]?.installState).toBe('installed');
+    expect(runtime.install).not.toHaveBeenCalled();
+  });
+
+  it('updates the in-place organization instance instead of installing a root copy for an older server', async () => {
+    const item = summary({
+      ghostId: 'helper', scope: 'organization', organizationId: 'org-1',
+      currentRelease: { ...summary().currentRelease, id: 'release-2', version: '2.0.0' },
+    });
+    const oldManifest = manifest('helper');
+    const installRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cindy-legacy-update-'));
+    roots.push(installRoot);
+    const installDir = path.join(installRoot, 'helper');
+    fs.mkdirSync(installDir);
+    fs.writeFileSync(path.join(installDir, 'ghost.json'), JSON.stringify(oldManifest));
+    runtime.ghosts = [{ manifest: oldManifest, dir: installDir, namespace: 'acme', enabled: true }];
+    const h = harness([item]);
+    h.ledger.upsertInstallation(recordForTest(item, {
+      namespace: 'acme', releaseId: 'release-1', version: '1.0.0',
+      manifestDigest: ghostManifestDigest(oldManifest),
+    }));
+    const updatedManifest = manifest('helper', '2.0.0');
+    runtime.install.mockImplementation(async (_filePath, options) => {
+      expect(options.namespace).toBe('acme');
+      fs.writeFileSync(path.join(installDir, 'ghost.json'), JSON.stringify(updatedManifest));
+      const updated = { manifest: updatedManifest, dir: installDir, namespace: 'acme', enabled: true };
+      runtime.ghosts = [updated];
+      return updated;
+    });
+
+    await h.service.install(item.id, {
+      ...reviewedInstallOptions(item), expectedInstalledApproval: APPROVED_INSTALL_TOKEN,
+    }, TEST_INSTALL_CONTEXT);
+    expect(runtime.install).toHaveBeenCalledOnce();
+    expect(h.ledger.installationForPlugin({ ghostId: 'helper', namespace: 'acme' })).toMatchObject({
+      releaseId: 'release-2', installed: true,
+    });
+    expect(h.ledger.installationForPlugin({ ghostId: 'helper', namespace: null })).toBeNull();
+  });
+
+  it('does not bind an ambiguous old organization response to either same-name instance', async () => {
+    const item = summary({ ghostId: 'helper', scope: 'organization', organizationId: 'org-1' });
+    const root = manifest('helper');
+    const installRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cindy-legacy-ambiguous-'));
+    roots.push(installRoot);
+    const rootDir = path.join(installRoot, 'helper');
+    const orgDir = path.join(installRoot, '_ns', 'acme', 'helper');
+    fs.mkdirSync(rootDir);
+    fs.mkdirSync(orgDir, { recursive: true });
+    fs.writeFileSync(path.join(rootDir, 'ghost.json'), JSON.stringify(root));
+    fs.writeFileSync(path.join(orgDir, 'ghost.json'), JSON.stringify(root));
+    runtime.ghosts = [
+      { manifest: root, dir: rootDir, namespace: null, enabled: true },
+      { manifest: root, dir: orgDir, namespace: 'acme', enabled: true },
+    ];
+    const h = harness([item]);
+    h.ledger.upsertInstallation(recordForTest(item, { namespace: 'acme', manifestDigest: ghostManifestDigest(root) }));
+    expect((await h.service.snapshot()).items[0]?.installState).toBe('conflict');
+    expect(runtime.install).not.toHaveBeenCalled();
+    await expect(h.service.install(item.id, {
+      ...reviewedInstallOptions(item, true), expectedInstalledApproval: APPROVED_INSTALL_TOKEN,
+    }, TEST_INSTALL_CONTEXT)).rejects.toThrow('[PRECONDITION_FAILED]');
+    expect(runtime.install).not.toHaveBeenCalled();
+  });
+
+  it('does not claim a namespace from an unverified legacy market record', async () => {
+    const item = summary({ ghostId: 'helper', scope: 'organization', organizationId: 'org-1' });
+    const installedManifest = manifest('helper');
+    const installRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cindy-legacy-unverified-'));
+    roots.push(installRoot);
+    const installDir = path.join(installRoot, 'helper');
+    fs.mkdirSync(installDir);
+    fs.writeFileSync(path.join(installDir, 'ghost.json'), JSON.stringify(installedManifest));
+    runtime.ghosts = [{ manifest: installedManifest, dir: installDir, namespace: 'acme', enabled: true }];
+    const h = harness([item]);
+    h.ledger.upsertInstallation(recordForTest(item, { namespace: 'acme' }));
+
+    expect((await h.service.snapshot()).items[0]?.installState).toBe('conflict');
+    expect(runtime.install).not.toHaveBeenCalled();
+  });
+
   it('does not re-check the server-selected organization upgrade against the client version', async () => {
     const item = summary({
       scope: 'organization',

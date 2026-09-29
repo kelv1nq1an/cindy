@@ -221,6 +221,21 @@ describe('classifyNamespaceMigration', () => {
     })).toEqual({ kind: 'commit', namespace: 'xd', basis: 'market-organization' });
   });
 
+  it('does not treat a removed organization route as evidence for a manual replacement', () => {
+    const removed = { scope: 'organization' as const, source: 'market' as const, organizationId: 'org-acme', namespace: 'acme', installed: false };
+    const record = readNamespaceMigrationMarketRecord(() => [removed]);
+    expect(classify({
+      ghostId: 'helper',
+      marketRecord: record,
+      marketSyncCompleted: true,
+      installOrigin: 'manual',
+      currentOrganization: { organizationId: 'org-acme', orgSlug: 'acme', pluginPrefix: null },
+    })).toEqual({ kind: 'commit', namespace: null, basis: 'manual-after-sync' });
+    expect(classify({
+      ghostId: 'helper', marketRecord: removed, marketSyncCompleted: true, installOrigin: 'manual',
+    })).toEqual({ kind: 'commit', namespace: null, basis: 'manual-after-sync' });
+  });
+
   it('does not turn an unreadable approved origin into a manual root install', () => {
     const unavailable = readNamespaceMigrationInstallOrigin(() => { throw new Error('locked receipt'); });
     const currentOrganization = { organizationId: 'org-acme', orgSlug: 'acme', pluginPrefix: null };

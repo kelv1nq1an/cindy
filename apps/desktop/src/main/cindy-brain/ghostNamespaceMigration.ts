@@ -74,6 +74,7 @@ export interface ClassifyNamespaceMigrationInput {
     source: 'market' | 'legacy-adopted' | 'git-market' | 'local-market';
     organizationId: string | null;
     namespace?: string | null;
+    installed?: boolean;
   } | null | undefined;
   currentOrganization: {
     organizationId: string;
@@ -86,7 +87,7 @@ export function readNamespaceMigrationMarketRecord(
   readRecords: () => readonly NonNullable<ClassifyNamespaceMigrationInput['marketRecord']>[],
 ): ClassifyNamespaceMigrationInput['marketRecord'] {
   try {
-    const records = readRecords();
+    const records = readRecords().filter((record) => record.installed !== false);
     if (records.length === 0) return null;
     return records.length === 1 ? records[0] : undefined;
   } catch {
@@ -193,7 +194,7 @@ export function captureRecoveredNamespaceEntry(
 export function classifyNamespaceMigration(
   input: ClassifyNamespaceMigrationInput,
 ): NamespaceClassification {
-  const record = input.marketRecord;
+  const record = input.marketRecord?.installed === false ? null : input.marketRecord;
   if (record === undefined) {
     return { kind: 'pending', reason: 'awaiting-market-facts' };
   }

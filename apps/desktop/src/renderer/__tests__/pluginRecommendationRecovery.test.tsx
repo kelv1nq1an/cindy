@@ -6,7 +6,7 @@ import { act, renderHook } from '@testing-library/react';
 import ts from 'typescript';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { pluginSuggestionComposerText } from '../features/cc-agent/pluginHomeSuggestions';
-import { installedGhostStoragePart } from '../../shared/pluginIdentity';
+import { findInstalledGhostByInstanceId, installedGhostStoragePart } from '../../shared/pluginIdentity';
 
 // Execute the production callbacks without mounting the unrelated full desktop shell.
 function compile(source: string, bindings: Record<string, unknown>) {
@@ -111,6 +111,26 @@ describe('plugin recommendation recovery', () => {
     expect(markUsed).toHaveBeenCalledWith('_ns__acme__helper');
   });
 
+  it('retains project scope for the recommended organization alongside its root sibling', () => {
+    const source = readFileSync(resolve(__dirname, '../features/plugin/GhostPluginPage.tsx'), 'utf8');
+    const block = source.slice(source.indexOf('  const [scopeDir, setScopeDir]'), source.indexOf('  const [recentGhostIds, setRecentGhostIds]'));
+    const workdirPrefsSync = vi.fn(() => ({ disabled: ['_ns__acme__helper'] }));
+    vi.stubGlobal('electronAPI', { ghosts: { workdirPrefsSync } });
+    const useScope = compile('return function useScope() { ' + block + '\nreturn {scopeDir, effectiveEnabled}; }', {
+      useState, useRef, useEffect, useCallback, findInstalledGhostByInstanceId,
+      recommendation: { nonce: 'org', workingDir: '/project', suggestion: { pluginId: '_ns__acme__helper' } },
+      ghosts: [
+        { manifest: { id: 'helper' }, dir: '/ghosts/helper', namespace: null, enabled: true },
+        { manifest: { id: 'helper' }, dir: '/ghosts/_ns/acme/helper', namespace: 'acme', enabled: true },
+      ],
+    });
+    const { result } = renderHook(() => useScope());
+    expect(workdirPrefsSync).toHaveBeenCalledWith('/project');
+    expect(result.current.scopeDir).toBe('/project');
+    expect(result.current.effectiveEnabled('_ns__acme__helper', true)).toBe(false);
+    expect(result.current.effectiveEnabled('helper', true)).toBe(true);
+  });
+
   it('names the organization instance in commandless suggestion previews and composer text', () => {
     const root = { manifest: { id: 'helper', name: 'Root' }, dir: '/ghosts/helper', namespace: null };
     const org = { manifest: { id: 'helper', name: 'Org' }, dir: '/ghosts/_ns/acme/helper', namespace: 'acme' };
@@ -137,6 +157,7 @@ describe('plugin recommendation recovery', () => {
         useRef,
         useEffect,
         useCallback,
+        findInstalledGhostByInstanceId,
         recommendation: { nonce: 'one', workingDir: '/project', suggestion: { pluginId: 'mail' } },
         ghosts: [{ manifest: { id: 'mail' }, enabled: true }],
       },

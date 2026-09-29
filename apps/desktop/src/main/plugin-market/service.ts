@@ -261,6 +261,30 @@ function snapshotManifestIdentity(
   return local.manifestIdentityByStoragePart.get(installedGhostStoragePart(ghost)) ?? null;
 }
 
+function legacyOrganizationDeliveryTarget<T extends VisiblePluginSummary | VisiblePluginDetail>(
+  plugin: T,
+  local: LocalInstallSnapshot,
+): T {
+  if (hasDeliveryNamespace(plugin) || plugin.scope !== 'organization') return plugin;
+  const ghosts = local.ghosts.filter((ghost) => ghost.manifest.id === plugin.ghostId);
+  const records = Object.values(local.installations).filter(
+    (record) => record.ghostId === plugin.ghostId && record.installed,
+  );
+  if (ghosts.length !== 1 || records.length !== 1) return plugin;
+  const ghost = ghosts[0]!;
+  const record = records[0]!;
+  const identity = snapshotManifestIdentity(local, ghost);
+  if (
+    !hasDeliveryNamespace(ghost) || ghost.namespace === null ||
+    !hasDeliveryNamespace(record) || record.namespace !== ghost.namespace ||
+    installedGhostPhysicalRelId(ghost) !== plugin.ghostId ||
+    (record.rawManifestSha256 === undefined && record.manifestDigest === undefined) ||
+    !serverRecordMatchesInstalledGhost(plugin.id, ghost, record, identity) ||
+    !serverRecordMatchesSummaryRoute(plugin, record)
+  ) return plugin;
+  return { ...plugin, namespace: ghost.namespace };
+}
+
 function recordFrom(
   plugin: VisiblePluginSummary | VisiblePluginDetail,
   source: PluginMarketInstallationRecord['source'],
@@ -1347,7 +1371,8 @@ export class PluginMarketService {
     if (plugin.currentRelease.id !== options.expectedReleaseId) {
       throwIpcError('PRECONDITION_FAILED', 'Plugin release changed after selection');
     }
-    const existing = installedGhostMatchingMarketPlugin(plugin);
+    const target = legacyOrganizationDeliveryTarget(plugin, this.localInstallSnapshot(ledger));
+    const existing = installedGhostMatchingMarketPlugin(target);
     return this.installDetail(
       plugin,
       {
@@ -2056,6 +2081,17 @@ export class PluginMarketService {
     ledger = this.ledgerForOwner(owner),
   ): Promise<PluginMarketInstallResult> {
     requireSameMarketOwner(owner);
+    const serverPlugin = plugin;
+    const local = this.localInstallSnapshot(ledger);
+    plugin = legacyOrganizationDeliveryTarget(plugin, local);
+    if (
+      plugin === serverPlugin && plugin.scope === 'organization' &&
+      !hasDeliveryNamespace(plugin) &&
+      local.ghosts.some((ghost) => ghost.manifest.id === plugin.ghostId &&
+        hasDeliveryNamespace(ghost) && ghost.namespace !== null)
+    ) {
+      throwIpcError('PRECONDITION_FAILED', 'Organization Plugin namespace is ambiguous');
+    }
     if (owner.mode === 'local' && plugin.scope !== 'public') {
       throwIpcError('PERMISSION_DENIED', 'Local mode can only access public Plugins');
     }
@@ -2108,7 +2144,7 @@ export class PluginMarketService {
     if (
       download.sha256 !== plugin.currentRelease.sha256 ||
       download.sizeBytes !== plugin.currentRelease.sizeBytes ||
-      !downloadIdentityMatchesPlugin(download, plugin)
+      !downloadIdentityMatchesPlugin(download, serverPlugin)
     ) {
       throwIpcError('PRECONDITION_FAILED', 'Plugin release metadata changed');
     }
@@ -2319,8 +2355,9 @@ export class PluginMarketService {
     plugin: VisiblePluginSummary,
     local = this.localInstallSnapshot(),
   ): PluginMarketItem {
-    const ghost = snapshotGhost(local, plugin);
-    const record = snapshotInstallation(local, plugin);
+    const target = legacyOrganizationDeliveryTarget(plugin, local);
+    const ghost = snapshotGhost(local, target);
+    const record = snapshotInstallation(local, target);
     const identity = snapshotManifestIdentity(local, ghost);
     const matchesUpdateRoute = Boolean(
       ghost
@@ -2328,7 +2365,10 @@ export class PluginMarketService {
       && serverRecordMatchesSummaryRoute(plugin, record ?? null),
     );
     // 其它同 id 条目不进入自动更新，但仍可由用户显式选择替换。
-    const conflict = Boolean(ghost && !matchesUpdateRoute);
+    const conflict = Boolean((ghost && !matchesUpdateRoute) ||
+      (!hasDeliveryNamespace(plugin) && plugin.scope === 'organization' &&
+        local.ghosts.some((candidate) => candidate.manifest.id === plugin.ghostId &&
+          hasDeliveryNamespace(candidate) && candidate.namespace !== null) && target === plugin));
     const installState: PluginMarketItem['installState'] = conflict
       ? 'conflict'
       : !matchesUpdateRoute
@@ -2339,7 +2379,7 @@ export class PluginMarketService {
     return {
       pluginId: plugin.id,
       ghostId: plugin.ghostId,
-      ...deliveryNamespaceFields(plugin),
+      ...deliveryNamespaceFields(target),
       name: plugin.name,
       description: plugin.description,
       author: plugin.author,
@@ -3044,13 +3084,14 @@ export class PluginMarketService {
     let reconciled = true;
     let local = this.localInstallSnapshot(ledger);
     for (const summary of plugins) {
+      const target = legacyOrganizationDeliveryTarget(summary, local);
       const retryKey = this.automaticUpgradeRetryKey(owner, 'server', summary.id);
       const releaseKey = summary.currentRelease.id;
-      const record = snapshotInstallation(local, summary);
+      const record = snapshotInstallation(local, target);
       if (
         (record?.source !== 'market' && record?.source !== 'legacy-adopted') ||
         this.toItem(summary, local).installState !== 'update-available' ||
-        isGhostBusy(summary) ||
+        isGhostBusy(target) ||
         this.shouldDeferAutomaticUpgrade(retryKey, releaseKey) ||
         this.isAutomaticUpgradeHeldForConsent(retryKey, releaseKey, releaseKey)
       ) {
@@ -3059,19 +3100,20 @@ export class PluginMarketService {
       try {
         await this.withMutation(summary.id, async () => {
           requireSameMarketOwner(owner);
-          if (isGhostBusy(summary)) {
+          if (isGhostBusy(target)) {
             throw new SilentUpgradeBusyError('Plugin is busy');
           }
           const freshLocal = this.localInstallSnapshot(ledger);
+          const freshTarget = legacyOrganizationDeliveryTarget(summary, freshLocal);
           if (
-            (snapshotInstallation(freshLocal, summary)?.source !== 'market' &&
-              snapshotInstallation(freshLocal, summary)?.source !== 'legacy-adopted') ||
+            (snapshotInstallation(freshLocal, freshTarget)?.source !== 'market' &&
+              snapshotInstallation(freshLocal, freshTarget)?.source !== 'legacy-adopted') ||
             this.toItem(summary, freshLocal).installState !== 'update-available'
           ) {
             log.debug?.('Plugin update already reconciled', { pluginId: summary.id });
             return;
           }
-          const freshInstalled = snapshotGhost(freshLocal, summary);
+          const freshInstalled = snapshotGhost(freshLocal, freshTarget);
           if (!freshInstalled) {
             log.warn('default plugin upgrade skipped because the installed record disappeared', {
               pluginId: summary.id,
@@ -3101,7 +3143,7 @@ export class PluginMarketService {
               expectedInstalled: true,
               expectedInstalledApproval: ghostInstallApprovalToken(freshInstalled.approval),
               beforeCommitInLock: () => {
-                if (isGhostBusy(summary)) {
+                if (isGhostBusy(freshTarget)) {
                   throw new SilentUpgradeBusyError('Plugin is busy');
                 }
               },
