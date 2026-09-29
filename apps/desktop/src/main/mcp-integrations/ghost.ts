@@ -1612,9 +1612,7 @@ export function getGhostRosterPrompt({ workingDir }: { workingDir?: string }): s
     const recall = ghostRecall(ghost);
     return {
       id: ghost.manifest.id,
-      namespace: Object.prototype.hasOwnProperty.call(ghost, 'namespace')
-        ? ghost.namespace ?? null
-        : null,
+      ...(ghost.namespaceMigration === 'pending' ? {} : { namespace: ghost.namespace ?? null }),
       name: ghost.manifest.name,
       ...(ghost.manifest.command ? { command: ghost.manifest.command } : {}),
       ...(recall ? { recall } : {}),
@@ -1854,6 +1852,7 @@ export function getCindyGhostsMcpDeps(
           const recall = ghostRecall(g);
           return {
             id: g.manifest.id,
+            ...(g.namespaceMigration === 'pending' ? {} : { namespace: g.namespace ?? null }),
             name: g.manifest.name,
             ...(g.manifest.command ? { command: g.manifest.command } : {}),
             ...(recall ? { recall } : {}),

@@ -900,46 +900,61 @@ export function assertGhostSecretsCanRelocate(fromGhostId: string, toGhostId: st
   }
 }
 
-export function migrateGhostSecrets(fromGhostId: string, toGhostId: string): void {
-  if (fromGhostId === toGhostId) return;
+export function migrateGhostSecrets(
+  fromGhostId: string,
+  toGhostId: string,
+  io: SecretStorageIo = electronSecretIo,
+): () => void {
+  if (fromGhostId === toGhostId) return () => {};
   const pairs = ghostSecretRelocationPrefixes(fromGhostId, toGhostId);
-  const moves: Array<{ from: string; to: string; value: string }> = [];
-  for (const key of electronSecretIo.list()) {
+  const moves: Array<{ from: string; to: string; value: string; destinationExisted: boolean }> = [];
+  for (const key of io.list()) {
     for (const [fromPrefix, toPrefix] of pairs) {
       if (!key.startsWith(fromPrefix)) continue;
       const dest = `${toPrefix}${key.slice(fromPrefix.length)}`;
-      const value = electronSecretIo.read(key);
+      const value = io.read(key);
       if (value === null) throw new Error('relocate source secret is unreadable');
-      const existing = electronSecretIo.read(dest);
+      const existing = io.read(dest);
       if (existing !== null && existing !== value) {
         throw new Error(`relocate secret destination already exists: ${dest}`);
       }
-      moves.push({ from: key, to: dest, value });
+      moves.push({ from: key, to: dest, value, destinationExisted: existing !== null });
       break;
     }
   }
-  const completed: Array<{ from: string; to: string; value: string }> = [];
+  const attempted: typeof moves = [];
+  const rollback = () => {
+    let failure: unknown;
+    for (const move of [...attempted].reverse()) {
+      try {
+        const sourceRestored = io.read(move.from) === move.value || io.write(move.from, move.value);
+        if (!sourceRestored) throw new Error('failed to restore relocated secret: ' + move.from);
+        if (!move.destinationExisted && !io.remove(move.to).success) {
+          throw new Error('failed to remove relocated secret: ' + move.to);
+        }
+      } catch (error) {
+        failure ??= error;
+      }
+    }
+    if (failure) throw failure;
+  };
   try {
     for (const move of moves) {
-      if (electronSecretIo.read(move.to) !== move.value && !electronSecretIo.write(move.to, move.value)) {
+      attempted.push(move);
+      if (io.read(move.to) !== move.value && !io.write(move.to, move.value)) {
         throw new Error(`failed to write relocated secret: ${move.to}`);
       }
-      if (!electronSecretIo.remove(move.from).success) {
+      if (!io.remove(move.from).success) {
         throw new Error(`failed to remove relocated secret: ${move.from}`);
       }
-      completed.push(move);
     }
   } catch (error) {
-    for (const move of completed.reverse()) {
-      try {
-        electronSecretIo.write(move.from, move.value);
-        electronSecretIo.remove(move.to);
-      } catch {
-        /* keep failing closed on the original error */
-      }
+    try { rollback(); } catch (rollbackError) {
+      void rollbackError;
     }
     throw error;
   }
+  return rollback;
 }
 
 export const genericOAuthSecretIo = {

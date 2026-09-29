@@ -6,6 +6,7 @@ import {
   findConflictingGhostCommand,
   findInstalledGhostByIdentity,
   findInstalledGhostByInstanceId,
+  findInstalledGhostForLocalUpdate,
   findInstalledGhostForDeliveryTarget,
   isGhostInstanceId,
   formatInstalledGhostAmbiguity,
@@ -128,6 +129,29 @@ describe('plugin logical identity', () => {
       ghost: enterprise,
     });
     expect(formatInstalledGhostAmbiguity('helper', [root, enterprise])).toContain('root/helper');
+  });
+
+  it('does not claim a pending legacy install as the explicit root identity', () => {
+    const pending = { manifest: { id: 'helper' }, namespaceMigration: 'pending' as const };
+    expect(resolveInstalledGhost([pending], 'helper')).toEqual({ status: 'unique', ghost: pending });
+    expect(resolveInstalledGhost([pending], 'helper', null)).toEqual({ status: 'missing' });
+    expect(findInstalledGhostForDeliveryTarget([pending], { ghostId: 'helper', namespace: null }))
+      .toBeUndefined();
+  });
+
+  it('binds local updates to the selected instance even when approval states are identical', () => {
+    const root = { manifest: { id: 'helper' }, dir: '/ghosts/helper', approval: { state: 'invalid' as const } };
+    const enterprise = {
+      manifest: { id: 'helper' }, dir: '/ghosts/_ns/acme/helper', namespace: 'acme',
+      approval: { state: 'invalid' as const },
+    };
+    expect(findInstalledGhostForLocalUpdate([root, enterprise], 'helper', '_ns__acme__helper', 'invalid'))
+      .toBe(enterprise);
+    expect(findInstalledGhostForLocalUpdate([root, enterprise], 'helper', 'helper', 'invalid')).toBe(root);
+    expect(findInstalledGhostForLocalUpdate([root, enterprise], 'helper', '_ns__acme__helper', 'legacy-unapproved'))
+      .toBeUndefined();
+    expect(findInstalledGhostForLocalUpdate([root, enterprise], 'other', 'helper', 'invalid'))
+      .toBeUndefined();
   });
 
   it('does not let a delivery target inherit a same-name instance from another namespace', () => {

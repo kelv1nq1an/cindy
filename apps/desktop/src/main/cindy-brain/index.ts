@@ -127,6 +127,7 @@ import {
   findConflictingGhostCommand,
   findInstalledGhostByIdentity,
   findInstalledGhostByInstanceId,
+  findInstalledGhostForLocalUpdate,
   findInstalledGhostForDeliveryTarget,
   installedGhostLogicalIdentity,
   installedGhostPhysicalKeys,
@@ -1420,20 +1421,27 @@ async function relocateGhostUserData(fromPart: string, toPart: string): Promise<
   if (fromPart === toPart) return;
   const planned = planGhostUserDataRelocation(fromPart, toPart);
   const moved: Array<{ from: string; to: string }> = [];
-  let secretsMoved = false;
+  let rollbackSecrets: (() => void) | null = null;
   let bindingMoved = false;
+  let rollbackWorkdir: (() => Promise<void>) | null = null;
   try {
     for (const move of planned) {
       relocateOwnedPath(move.from, move.to);
       moved.push(move);
     }
-    migrateGhostSecrets(fromPart, toPart);
-    secretsMoved = true;
+    rollbackSecrets = migrateGhostSecrets(fromPart, toPart);
     await getGhostLibraryBindingStore().relocateBinding(fromPart, toPart);
     bindingMoved = true;
+    rollbackWorkdir = await relocateGhostWorkdirPrefs(fromPart, toPart);
     await ledger.relocateGhostMediaRefs(fromPart, toPart);
-    await relocateGhostWorkdirPrefs(fromPart, toPart);
   } catch (error) {
+    if (rollbackWorkdir) {
+      try {
+        await rollbackWorkdir();
+      } catch (rollbackError) {
+        void rollbackError;
+      }
+    }
     if (bindingMoved) {
       try {
         await getGhostLibraryBindingStore().relocateBinding(toPart, fromPart);
@@ -1441,9 +1449,9 @@ async function relocateGhostUserData(fromPart: string, toPart: string): Promise<
         /* keep failing closed on the original error */
       }
     }
-    if (secretsMoved) {
+    if (rollbackSecrets) {
       try {
-        migrateGhostSecrets(toPart, fromPart);
+        rollbackSecrets();
       } catch {
         /* keep failing closed on the original error */
       }
@@ -6357,6 +6365,7 @@ async function updateLocalGhostPackageLocked(
   inspected: InspectedGhostPackage,
   expectedPackageSha256: string,
   expectedInstalledApproval: string,
+  expectedInstalledInstanceId: string,
   consent: GhostInstallConsentDecision,
   installOrigin?: 'agent-forge',
   isCurrent?: () => boolean,
@@ -6371,13 +6380,10 @@ async function updateLocalGhostPackageLocked(
   const marketLedger = getPluginMarketLedger().bind(
     ownerScopedUserDataPath('plugin-market', 'ledger.v1.json'),
   );
-  const sameIdGhosts = manager.list().filter((g) => g.manifest.id === inspected.manifest.id);
-  const previousGhost =
-    sameIdGhosts.find(
-      (g) => ghostInstallApprovalToken(g.approval) === expectedInstalledApproval,
-    ) ??
-    (sameIdGhosts.length === 1 ? sameIdGhosts[0] : undefined) ??
-    sameIdGhosts.find((g) => installedGhostStoragePart(g) === inspected.manifest.id);
+  const previousGhost = findInstalledGhostForLocalUpdate(
+    manager.list(), inspected.manifest.id, expectedInstalledInstanceId, expectedInstalledApproval,
+  );
+  if (!previousGhost) throwIpcError('PRECONDITION_FAILED', '目标插件实例已变化，请刷新后重试');
   // 锁内按真实包与现读受体复核锁外求得的确认；熄灯之前拒绝，不打断正在用的旧版本。
   assertGhostInstallConsent(consent, previousGhost, inspected.manifest, expectedPackageSha256);
   runtime.stop(previousGhost ? installedGhostStoragePart(previousGhost) : inspected.manifest.id);
@@ -6617,6 +6623,7 @@ export async function installOrUpdateLocalGhostPackageFromForge(
           inspected,
           expected.packageSha256,
           ghostInstallApprovalToken(installed.approval),
+          installedGhostStoragePart(installed),
           consent,
           installOrigin,
           expected.isCurrent,
@@ -8349,10 +8356,12 @@ export function registerGhostIpc(): void {
       | {
           expectedPackageSha256?: unknown;
           expectedInstalledApproval?: unknown;
+          expectedInstalledInstanceId?: unknown;
         }
       | undefined;
     const expectedPackageSha256 = updateOptions?.expectedPackageSha256;
     const expectedInstalledApproval = updateOptions?.expectedInstalledApproval;
+    const expectedInstalledInstanceId = updateOptions?.expectedInstalledInstanceId;
     if (
       typeof expectedPackageSha256 !== 'string' ||
       !/^[a-f0-9]{64}$/.test(expectedPackageSha256)
@@ -8361,6 +8370,9 @@ export function registerGhostIpc(): void {
     }
     if (!isGhostInstallApprovalToken(expectedInstalledApproval)) {
       throwIpcError('INVALID_PARAMS', 'expectedInstalledApproval must come from ghosts:list');
+    }
+    if (typeof expectedInstalledInstanceId !== 'string') {
+      throwIpcError('INVALID_PARAMS', 'expectedInstalledInstanceId must come from ghosts:list');
     }
     const inspected = await manager.inspect(lizFilePath);
     if ('rejection' in inspected) throwInstallError(inspected.rejection);
@@ -8371,9 +8383,10 @@ export function registerGhostIpc(): void {
     rejectBrokerWithoutDeclaredRedirectPort(inspected.manifest);
     rejectUnauthorizedTokenBroker(inspected.manifest);
     // 新版本权限变多时先请用户确认；权限没变多的更新不打扰。
-    const existingForUpdate =
-      manager.list().find((ghost) => ghostInstallApprovalToken(ghost.approval) === expectedInstalledApproval)
-      ?? findInstalledGhostForDeliveryTarget(manager.list(), { ghostId: inspected.manifest.id });
+    const existingForUpdate = findInstalledGhostForLocalUpdate(
+      manager.list(), inspected.manifest.id, expectedInstalledInstanceId, expectedInstalledApproval,
+    );
+    if (!existingForUpdate) throwIpcError('PRECONDITION_FAILED', '目标插件实例已变化，请刷新后重试');
     const consent = await obtainGhostInstallConsent(
       {
         mode: 'prompt',
@@ -8399,6 +8412,7 @@ export function registerGhostIpc(): void {
             inspected,
             expectedPackageSha256,
             expectedInstalledApproval,
+            expectedInstalledInstanceId,
             consent,
           ),
         ),

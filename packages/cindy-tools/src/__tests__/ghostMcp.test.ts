@@ -1781,6 +1781,17 @@ describe("cindy_ghosts · ghost_forge(锻造)", () => {
 const GHOST_ROSTER_CACHE_PREFIX_BUDGET_CHARS = 8_000;
 
 describe("formatGhostRoster(花名册快照:JSONL 召回数据源)", () => {
+  it('preserves root and organization identities in both prompt and tool roster', async () => {
+    const { buildGhostRosterPrompt, formatGhostRoster } = await import('../ghost/mcpServer');
+    const items = [
+      { id: 'helper', namespace: null, name: 'Root' },
+      { id: 'helper', namespace: 'acme', name: 'Organization' },
+    ];
+    for (const roster of [formatGhostRoster(items), buildGhostRosterPrompt(items)]) {
+      expect(roster).toContain('"namespace":null');
+      expect(roster).toContain('"namespace":"acme"');
+    }
+  });
   it("固定字段序列化;折叠/截断/空清单/条数/预算", async () => {
     const { formatGhostRoster } = await import("../ghost/mcpServer");
     expect(formatGhostRoster([])).toBe("");

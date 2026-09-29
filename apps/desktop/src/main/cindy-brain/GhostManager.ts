@@ -15,8 +15,9 @@ import {
   createPluginLogicalIdentity,
   findConflictingGhostCommand,
   findInstalledGhostByIdentity,
+  findInstalledGhostByInstanceId,
   hasDeliveryNamespace,
-  installedGhostLogicalIdentity,
+  installedGhostStoragePart,
   isValidPluginInstallRelId,
   parsePluginInstallRelId,
   parsePluginStoragePart,
@@ -659,19 +660,16 @@ export class GhostManager {
     let entries: fs.Dirent[];
     try {
       entries = fs.readdirSync(root, { withFileTypes: true });
-    } catch {
-      return [];
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+      throw error;
     }
     const candidates: NamespaceCensusCandidate[] = [];
     for (const entry of entries) {
       if (entry.name.startsWith('.') || entry.name === PLUGIN_NS_INSTALL_ROOT) continue;
       if (!isValidGhostId(entry.name)) continue;
       const dir = path.join(root, entry.name);
-      try {
-        if (classifyGhostDirEntrySync(dir) !== 'directory') continue;
-      } catch {
-        continue;
-      }
+      if (classifyGhostDirEntrySync(dir) !== 'directory') continue;
       const approval = this.readApproval(entry.name);
       candidates.push({
         ghostId: entry.name,
@@ -697,11 +695,18 @@ export class GhostManager {
   }
 
   private loadNamespaceMigrationLedger(): NamespaceMigrationLedger | null {
-    const outcome = censusNamespaceMigration(
-      this.namespaceMigrationStore().read(),
-      this.rootInstallCensusCandidates(),
-      new Date().toISOString(),
-    );
+    const existing = this.namespaceMigrationStore().read();
+    if (existing.kind === 'ok') return existing.ledger;
+    let candidates: NamespaceCensusCandidate[];
+    try {
+      candidates = this.rootInstallCensusCandidates();
+    } catch (error) {
+      this.options.log?.warn('namespace migration census scan failed', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return null;
+    }
+    const outcome = censusNamespaceMigration(existing, candidates, new Date().toISOString());
     if (outcome.kind === 'blocked') {
       this.options.log?.warn('namespace migration census blocked', { reason: outcome.reason });
       return null;
@@ -2379,7 +2384,9 @@ export class GhostManager {
           ...(identity.namespace !== null || (approvalResult.state === 'approved' && hasDeliveryNamespace(approvalResult.receipt))
             ? { namespace: identity.namespace !== null ? identity.namespace : approvalResult.receipt.namespace }
             : {}),
-          ...(identity.namespace === null && namespaceLedger && isPendingNamespaceGhost(namespaceLedger, identity.ghostId) ? { namespaceMigration: 'pending' as const } : {}),
+          ...(identity.namespace === null && (namespaceLedger
+            ? isPendingNamespaceGhost(namespaceLedger, identity.ghostId)
+            : !hasDeliveryNamespace(receipt)) ? { namespaceMigration: 'pending' as const } : {}),
           enabled: this.effectiveEnabled(dir, receipt.enabled),
           approval: { state: 'approved', revision: receipt.revision },
           trust: receipt.trust,
@@ -2456,7 +2463,9 @@ export class GhostManager {
         ...(identity.namespace !== null
           ? { namespace: identity.namespace }
           : {}),
-        ...(identity.namespace === null && namespaceLedger && isPendingNamespaceGhost(namespaceLedger, identity.ghostId) ? { namespaceMigration: 'pending' as const } : {}),
+        ...(identity.namespace === null && (namespaceLedger
+          ? isPendingNamespaceGhost(namespaceLedger, identity.ghostId)
+          : true) ? { namespaceMigration: 'pending' as const } : {}),
         enabled: false,
         approval: { state: approvalResult.state },
         // 未批准安装目录里的 trust 镜像是可变字节，不能作为可信展示事实。
@@ -2486,7 +2495,7 @@ export class GhostManager {
   } {
     const list = this.list();
     const ghost =
-      findInstalledGhostByIdentity(list, installedGhostLogicalIdentity(fallback)) ??
+      findInstalledGhostByInstanceId(list, installedGhostStoragePart(fallback)) ??
       ({
         ...fallback,
         enabled: false,

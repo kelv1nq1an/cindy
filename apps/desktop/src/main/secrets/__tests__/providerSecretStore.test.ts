@@ -51,6 +51,7 @@ import {
   readCustomProviderKeyForMutation,
   readGhostSecretStrict,
   readGhostSecretTailFromIo,
+  migrateGhostSecrets,
   setMivoSecretAliasVerifier,
   resolveOwnerScopedSecretStorageKey,
   setProviderSecretsClearedListener,
@@ -91,6 +92,47 @@ function createMemoryIo(): SecretStorageIo & { store: Map<string, string> } {
     list: () => [...store.keys()],
   };
 }
+
+describe('ghost secret relocation rollback', () => {
+  const source = ghostSecretStorageKey('helper', 'one');
+  const destination = ghostSecretStorageKey('_ns__acme__helper', 'one');
+  const secondSource = ghostSecretStorageKey('helper', 'two');
+  const secondDestination = ghostSecretStorageKey('_ns__acme__helper', 'two');
+
+  it('keeps the destination when restoring the only old copy fails', () => {
+    const io = createMemoryIo();
+    io.store.set(source, 'fake-one');
+    io.store.set(secondSource, 'fake-two');
+    const write = io.write;
+    const remove = io.remove;
+    io.write = (key, value) => key === source ? false : write(key, value);
+    io.remove = (key) => key === secondSource ? { success: false } : remove(key);
+    expect(() => migrateGhostSecrets('helper', '_ns__acme__helper', io)).toThrow();
+    expect(io.store.get(destination)).toBe('fake-one');
+    expect(io.store.has(source)).toBe(false);
+    expect(io.store.get(secondSource)).toBe('fake-two');
+    expect(io.store.has(secondDestination)).toBe(false);
+  });
+
+  it('rolls back the current write if removing its source fails', () => {
+    const io = createMemoryIo();
+    io.store.set(source, 'fake-one');
+    io.remove = (key) => key === source ? { success: false } : (io.store.delete(key), { success: true });
+    expect(() => migrateGhostSecrets('helper', '_ns__acme__helper', io)).toThrow();
+    expect(io.store.get(source)).toBe('fake-one');
+    expect(io.store.has(destination)).toBe(false);
+  });
+
+  it('does not delete a same-valued destination that predates a later rollback', () => {
+    const io = createMemoryIo();
+    io.store.set(source, 'fake-one');
+    io.store.set(destination, 'fake-one');
+    const undo = migrateGhostSecrets('helper', '_ns__acme__helper', io);
+    undo();
+    expect(io.store.get(source)).toBe('fake-one');
+    expect(io.store.get(destination)).toBe('fake-one');
+  });
+});
 
 describe('providerSecrets registry', () => {
   it('maps known providers to their stable storage keys', () => {

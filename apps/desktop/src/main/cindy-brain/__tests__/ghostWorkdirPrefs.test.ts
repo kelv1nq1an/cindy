@@ -53,6 +53,16 @@ describe('relocateGhostWorkdirPrefs', () => {
     expect(listDisabledGhostIdsForWorkdir('/project/b')).toEqual(['_ns__acme__helper']);
   });
 
+  it('restores exactly the previous disabled identities when a later relocation fails', async () => {
+    setGhostDisabledForWorkdir('/project/a', 'helper', true);
+    setGhostDisabledForWorkdir('/project/b', 'helper', true);
+    setGhostDisabledForWorkdir('/project/b', '_ns__acme__helper', true);
+    const rollback = await relocateGhostWorkdirPrefs('helper', '_ns__acme__helper');
+    await rollback();
+    expect(listDisabledGhostIdsForWorkdir('/project/a')).toEqual(['helper']);
+    expect(listDisabledGhostIdsForWorkdir('/project/b')).toEqual(['_ns__acme__helper', 'helper']);
+  });
+
   it('does not overwrite unreadable preferences; retry succeeds once repaired', async () => {
     setGhostDisabledForWorkdir('/project/a', 'helper', true);
     const file = path.join(scope.dir, 'ghost-workdir-prefs.json');

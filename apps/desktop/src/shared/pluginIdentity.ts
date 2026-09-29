@@ -1,5 +1,5 @@
 import { isValidPluginNamespace } from '@cindy/plugin-protocol';
-import { isValidGhostId } from './ghost.js';
+import { ghostInstallApprovalToken, isValidGhostId, type GhostInstallApproval } from './ghost.js';
 
 function isGhostIdValue(id: string): boolean {
   return isValidGhostId(id);
@@ -302,10 +302,12 @@ export function installedGhostLogicalIdentity(ghost: {
 export function findInstalledGhostByIdentity<T extends {
   manifest: { id: string };
   namespace?: string | null;
+  namespaceMigration?: 'pending';
 }>(ghosts: readonly T[], identity: PluginLogicalIdentity): T | undefined {
   const rel = pluginInstallRelId(identity);
   return ghosts.find(
-    (ghost) => pluginInstallRelId(installedGhostLogicalIdentity(ghost)) === rel,
+    (ghost) => ghost.namespaceMigration !== 'pending' &&
+      pluginInstallRelId(installedGhostLogicalIdentity(ghost)) === rel,
   );
 }
 
@@ -323,6 +325,18 @@ export function findInstalledGhostByInstanceId<T extends {
   if (byStorage) return byStorage;
   const identity = parsePluginInstallRelId(instanceId);
   return identity ? findInstalledGhostByIdentity(ghosts, identity) : undefined;
+}
+
+export function findInstalledGhostForLocalUpdate<T extends {
+  manifest: { id: string };
+  dir?: string;
+  namespace?: string | null;
+  approval: GhostInstallApproval;
+}>(ghosts: readonly T[], ghostId: string, instanceId: string, approvalToken: string): T | undefined {
+  if (!isValidPluginStoragePart(instanceId)) return undefined;
+  const ghost = findInstalledGhostByInstanceId(ghosts, instanceId);
+  return ghost?.manifest.id === ghostId && installedGhostStoragePart(ghost) === instanceId &&
+    ghostInstallApprovalToken(ghost.approval) === approvalToken ? ghost : undefined;
 }
 
 export type InstalledGhostIdentityResolve<T> =

@@ -272,7 +272,7 @@ function toHostSetupPlan(input: GhostSetupPlanInput): CindyGhostSetupPlan {
  * 作者字段只进入 JSONL 数据块；固定前导/尾注不混入作者内容。
  */
 export function formatGhostRoster(
-  items: Array<Pick<CindyGhostInfo, "id" | "name" | "command" | "recall">>,
+  items: Array<Pick<CindyGhostInfo, "id" | "name" | "command" | "recall" | "namespace">>,
 ): string {
   if (items.length === 0) return "";
   const lines = [...items]
@@ -283,6 +283,7 @@ export function formatGhostRoster(
         value.replace(/\s+/g, " ").trim();
       return JSON.stringify({
         id: normalize(g.id),
+        ...(g.namespace !== undefined ? { namespace: g.namespace } : {}),
         name: normalize(g.name).slice(0, 64),
         command: g.command ? normalize(g.command).slice(0, 32) : "",
         recall: g.recall
@@ -306,7 +307,7 @@ export function formatGhostRoster(
 
 /** 构造宿主注入 system/developer 段；行格式与 ghost_list 花名册共用。 */
 export function buildGhostRosterPrompt(
-  items: Array<Pick<CindyGhostInfo, "id" | "name" | "command" | "recall">>,
+  items: Array<Pick<CindyGhostInfo, "id" | "name" | "command" | "recall" | "namespace">>,
 ): string {
   return formatGhostRoster(items);
 }

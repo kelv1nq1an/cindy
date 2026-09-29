@@ -42,17 +42,15 @@ function writeMarker(marker: PendingRelocation): void {
   }
 }
 
-export function pendingGhostOptionalRelocations(): PendingRelocation[] {
-  const directory = ownerScopedUserDataPath('ghost-optional-relocations');
-  if (!fs.existsSync(directory)) return [];
-  return fs
-    .readdirSync(directory)
-    .filter((name) => name.endsWith('.json'))
-    .map((name) => readMarker(path.join(directory, name)));
-}
-
 export function isGhostOptionalRelocationSource(id: string): boolean {
-  return pendingGhostOptionalRelocations().some((marker) => marker.fromId === id);
+  if (!isGhostInstanceId(id)) return false;
+  try {
+    fs.lstatSync(markerPath(id));
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    throw error;
+  }
 }
 
 export function prepareGhostOptionalRelocation(fromId: string, toId: string): void {
@@ -74,7 +72,16 @@ export function retryGhostOptionalRelocations(
   relocate: (fromId: string, toId: string) => void,
   onError: (error: unknown, fromId: string) => void,
 ): void {
-  for (const marker of pendingGhostOptionalRelocations()) {
+  const directory = ownerScopedUserDataPath('ghost-optional-relocations');
+  if (!fs.existsSync(directory)) return;
+  for (const name of fs.readdirSync(directory).filter((file) => file.endsWith('.json'))) {
+    let marker: PendingRelocation;
+    try {
+      marker = readMarker(path.join(directory, name));
+    } catch (error) {
+      onError(error, name.slice(0, -'.json'.length));
+      continue;
+    }
     if (!marker.ready) continue;
     try {
       relocate(marker.fromId, marker.toId);

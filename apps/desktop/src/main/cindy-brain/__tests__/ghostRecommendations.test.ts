@@ -191,6 +191,37 @@ describe('plugin recommendation state', () => {
       fs.rmSync(owner, { recursive: true, force: true });
     }
   });
+  it('quarantines a corrupt optional marker without blocking unrelated relocations', () => {
+    const owner = fs.mkdtempSync(path.join(os.tmpdir(), 'ghost-optional-history-'));
+    state.owner = owner;
+    try {
+      const directory = path.join(owner, 'ghost-optional-relocations');
+      fs.mkdirSync(directory, { recursive: true });
+      fs.writeFileSync(path.join(directory, 'damaged.json'), '{');
+      prepareGhostOptionalRelocation('helper', '_ns__acme__helper');
+      readyGhostOptionalRelocation('helper', '_ns__acme__helper');
+      const moved = vi.fn();
+      const onError = vi.fn();
+      expect(isGhostOptionalRelocationSource('damaged')).toBe(true);
+      retryGhostOptionalRelocations(moved, onError);
+      expect(moved).toHaveBeenCalledWith('helper', '_ns__acme__helper');
+      expect(onError).toHaveBeenCalledWith(expect.any(Error), 'damaged');
+      expect(isGhostOptionalRelocationSource('damaged')).toBe(true);
+      expect(isGhostOptionalRelocationSource('helper')).toBe(false);
+    } finally {
+      fs.rmSync(owner, { recursive: true, force: true });
+    }
+  });
+  it('fails closed when the optional marker cannot be inspected', () => {
+    const stat = vi.spyOn(fs, 'lstatSync').mockImplementation(() => {
+      throw Object.assign(new Error('denied'), { code: 'EACCES' });
+    });
+    try {
+      expect(() => isGhostOptionalRelocationSource('helper')).toThrow('denied');
+    } finally {
+      stat.mockRestore();
+    }
+  });
   it('rejects invalid replacement without losing previous tasks', () => {
     replaceGhostRecommendations('example', [item]);
     expect(replaceGhostRecommendations('example', [{ ...item, pluginId: 'other' }]).ok).toBe(false);

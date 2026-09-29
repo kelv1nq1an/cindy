@@ -113,16 +113,31 @@ export function setGhostDisabledForWorkdir(workdir: string, ghostId: string, dis
 }
 
 /** 原位组织插件改用 namespace 物理 ID 时，保留各项目的禁用例外。 */
-export async function relocateGhostWorkdirPrefs(fromPart: string, toPart: string): Promise<void> {
-  if (fromPart === toPart) return;
+export async function relocateGhostWorkdirPrefs(fromPart: string, toPart: string): Promise<() => Promise<void>> {
+  if (fromPart === toPart) return async () => {};
+  const moved = new Map<string, boolean>();
   await store.updateAtomic(({ value }) => {
     const next = { ...value.disabledByWorkdir };
     for (const [workdir, disabled] of Object.entries(next)) {
       if (!disabled.includes(fromPart)) continue;
+      moved.set(workdir, disabled.includes(toPart));
       next[workdir] = [...new Set([...disabled.filter((id) => id !== fromPart), toPart])].sort();
     }
     return { disabledByWorkdir: next };
   });
+  return async () => {
+    if (moved.size === 0) return;
+    await store.updateAtomic(({ value }) => {
+      const next = { ...value.disabledByWorkdir };
+      for (const [workdir, hadDestination] of moved) {
+        const disabled = new Set(next[workdir] ?? []);
+        disabled.add(fromPart);
+        if (!hadDestination) disabled.delete(toPart);
+        next[workdir] = [...disabled].sort();
+      }
+      return { disabledByWorkdir: next };
+    });
+  };
 }
 
 /** 测试钩子(仅纯函数;读写链路由 IPC / 生效点测试覆盖)。 */

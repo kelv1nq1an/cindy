@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { InstalledGhost } from '../../../shared/ghost.js';
 import { createOrganizationPrefixStore } from '../../plugin-market/organizationPrefixStore.js';
@@ -115,6 +115,29 @@ async function makeCindy(id: string): Promise<string> {
 }
 
 describe('GhostManager namespace migration census', () => {
+  it('retries a failed first directory scan instead of persisting an empty census', async () => {
+    await plantLegacyInstall('hello');
+    const actualRead = fs.readdirSync;
+    const read = vi.spyOn(fs, 'readdirSync').mockImplementation(((directory: fs.PathLike, ...args: unknown[]) => {
+      if (String(directory) === rootDir) {
+        read.mockRestore();
+        throw Object.assign(new Error('unavailable'), { code: 'EACCES' });
+      }
+      return actualRead(directory, ...(args as []));
+    }) as typeof fs.readdirSync);
+    try {
+      expect(manager.ensureNamespaceMigrationCensus()).toBeNull();
+    } finally {
+      read.mockRestore();
+    }
+    expect(manager.ensureNamespaceMigrationCensus()?.entries.hello?.status).toBe('pending');
+  });
+  it('keeps an old unstamped install unresolved when its census is unavailable', async () => {
+    await plantLegacyInstall('hello');
+    fs.writeFileSync(path.join(workDir, 'ghosts-install-state', 'namespace-migration.v1.json'), '{');
+    expect(manager.list()[0]?.namespaceMigration).toBe('pending');
+    expect(manager.list()[0]?.namespace).toBeUndefined();
+  });
   it('waits for approved origin and organization prefix before committing a Forge install', async () => {
     await plantLegacyInstall('acme-tool', false, 'agent-forge');
     const prefixStore = createOrganizationPrefixStore(path.join(workDir, 'organization.v1.json'));

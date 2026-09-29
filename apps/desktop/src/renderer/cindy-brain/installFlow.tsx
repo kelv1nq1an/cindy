@@ -55,6 +55,7 @@ async function runUpdate(
     const { ghost } = await window.electronAPI.ghosts.update(lizFilePath, {
       expectedPackageSha256: packageSha256,
       expectedInstalledApproval: ghostInstallApprovalToken(installed.approval),
+      expectedInstalledInstanceId: installedGhostStoragePart(installed),
     });
     toast.success(
       t('settings.ghosts.toast.updated', {

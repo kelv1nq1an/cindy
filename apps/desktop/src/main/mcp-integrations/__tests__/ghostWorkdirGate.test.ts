@@ -1516,7 +1516,7 @@ describe('Manual-only Ghost discovery and read gates', () => {
       const roster = deps.getRosterItems?.() ?? [];
       expect(roster.map(({ id }) => id)).toEqual(['ios-simulator', 'art']);
       expect(roster[0]).toEqual({
-        id: 'ios-simulator', name: 'iOS Simulator', recall: ghost.manifest.whenToUse,
+        id: 'ios-simulator', namespace: null, name: 'iOS Simulator', recall: ghost.manifest.whenToUse,
       });
       const ghosts = await deps.listAwakeGhosts();
       expect(ghosts).toHaveLength(2);
