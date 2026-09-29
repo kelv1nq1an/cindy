@@ -3539,6 +3539,50 @@ describe('PluginMarketService migration and defaultInstall', () => {
     },
   );
 
+  it('purges only the matching namespaced organization installation from a legacy notice', async () => {
+    const notice = removal({ ghostId: 'helper' });
+    const h = harness([], [notice]);
+    const orgDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cindy-market-org-'));
+    const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cindy-market-root-'));
+    roots.push(orgDir, rootDir);
+    fs.writeFileSync(path.join(orgDir, 'ghost.json'), JSON.stringify(manifest('helper')));
+    fs.writeFileSync(path.join(rootDir, 'ghost.json'), JSON.stringify(manifest('helper')));
+    runtime.ghosts = [
+      { ...ghostEntry('helper'), dir: rootDir, namespace: null },
+      { ...ghostEntry('helper'), dir: orgDir, namespace: 'acme' },
+    ];
+    h.ledger.upsertInstallation(removalRecord({ ghostId: 'helper', namespace: 'acme', manifestDigest: ghostManifestDigest(manifest('helper')) }));
+    h.ledger.upsertInstallation(removalRecord({ ghostId: 'helper', namespace: null, pluginId: 'other-plugin', scope: 'public', organizationId: null }));
+    await h.service.snapshot();
+    expect(runtime.uninstall).toHaveBeenCalledWith('_ns/acme/helper', { skipMarketLedger: true });
+    expect(h.ledger.installationForPlugin({ ghostId: 'helper', namespace: 'acme' })?.installed).toBe(false);
+    expect(h.ledger.installationForPlugin({ ghostId: 'helper', namespace: null })?.installed).toBe(true);
+  });
+
+  it('does not purge a namespaced organization for another organization', async () => {
+    const notice = removal({ ghostId: 'helper' });
+    const h = harness([], [notice]);
+    runtime.ghosts = [{ ...ghostEntry('helper'), namespace: 'acme' }];
+    h.ledger.upsertInstallation(removalRecord({ ghostId: 'helper', namespace: 'acme', organizationId: 'other-org' }));
+    await h.service.snapshot();
+    expect(runtime.uninstall).not.toHaveBeenCalled();
+    expect(h.ledger.installationForPlugin({ ghostId: 'helper', namespace: 'acme' })?.installed).toBe(true);
+  });
+
+  it('does not guess a namespace for an ambiguous old notice or override an explicit namespace', async () => {
+    const notice = removal({ ghostId: 'helper' });
+    const h = harness([], [notice]);
+    runtime.ghosts = [{ ...ghostEntry('helper'), namespace: 'acme' }];
+    h.ledger.upsertInstallation(removalRecord({ ghostId: 'helper', namespace: 'acme' }));
+    h.ledger.upsertInstallation(removalRecord({ ghostId: 'helper', namespace: 'other' }));
+    h.ledger.upsertInstallation(removalRecord({ ghostId: 'helper', namespace: null }));
+    await h.service.snapshot();
+    expect(runtime.uninstall).not.toHaveBeenCalled();
+    h.api.listAll.mockResolvedValueOnce({ plugins: [], removals: [{ ...notice, namespace: 'unknown' }], currentOrganization: null });
+    await h.service.snapshot();
+    expect(runtime.uninstall).not.toHaveBeenCalled();
+  });
+
   it('purges when the ledger provenance digest matches the installed package', async () => {
     const notice = removal();
     const h = harness([], [notice]);

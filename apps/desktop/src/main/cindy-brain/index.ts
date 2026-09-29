@@ -3,8 +3,15 @@ import { projectGhostAgentModels } from './ghostAgentModels.js';
 import { getDesktopProviderService } from '../maker-host/createDesktopProviderService.js';
 import { PluginDownloadSlot } from './downloadSlot.js';
 import { createDownloader } from '../downloader/index.js';
-import { registerGhostCardRemoteProvider, persistGhostCardWithRemoteChange } from './cardRemoteResource.js';
-import { openDeviceAuthorizationCard, openPluginAuthorizationCard } from '../plugin-oauth/deviceCard.js';
+import {
+  registerGhostCardRemoteProvider,
+  persistGhostCardWithRemoteChange,
+  findGhostForRemotePluginIdentity,
+} from './cardRemoteResource.js';
+import {
+  openDeviceAuthorizationCard,
+  openPluginAuthorizationCard,
+} from '../plugin-oauth/deviceCard.js';
 import { t as authorizationText } from '../i18n.js';
 import { getBotAuthorizationService } from '../maker-ipc/botAuthorizationService.js';
 import { isResidentBrowserGhost, spawnResidentGhost } from './residentGhost.js';
@@ -7108,7 +7115,7 @@ function readLegacyEncryptedSecret(file: string): LegacyMigrationRead<string> {
 
 export function registerGhostIpc(): void {
   registerGhostCardRemoteProvider((id) => {
-    const ghost = availableGhosts().find((item) => item.manifest.id === id);
+    const ghost = findGhostForRemotePluginIdentity(availableGhosts(), id);
     return ghost ? { name: ghost.manifest.name, iconDataUrl: ghost.iconDataUrl } : undefined;
   });
   if (ipcRegistered) return;

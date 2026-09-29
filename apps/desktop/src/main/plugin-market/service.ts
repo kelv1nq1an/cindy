@@ -237,6 +237,22 @@ function snapshotInstallation(
   return local.installations[pluginLedgerRecordKey(plugin)];
 }
 
+function removalIdentity(
+  removal: PluginRemovalNotice,
+  installations: Readonly<Record<string, PluginMarketInstallationRecord>>,
+): PluginRemovalNotice | null {
+  if (hasDeliveryNamespace(removal) || removal.scope !== 'organization') return removal;
+  const matches = Object.values(installations).filter((record) =>
+    typeof record.namespace === 'string' &&
+    record.pluginId === removal.pluginId &&
+    record.ghostId === removal.ghostId &&
+    record.scope === 'organization' &&
+    record.organizationId === removal.organizationId,
+  );
+  if (matches.length > 1) return null;
+  return matches.length === 1 ? { ...removal, namespace: matches[0]!.namespace } : removal;
+}
+
 function snapshotGhost(
   local: LocalInstallSnapshot,
   plugin: { ghostId: string; namespace?: string | null },
@@ -2791,6 +2807,7 @@ export class PluginMarketService {
     ): string | null => {
       if (!record) return 'ledger-record-missing';
       if (record.pluginId !== removal.pluginId) return 'plugin-id-mismatch';
+      if (record.organizationId !== removal.organizationId) return 'organization-id-mismatch';
       if (record.source !== 'market' && record.source !== 'legacy-adopted') {
         return 'non-server-source';
       }
@@ -2809,7 +2826,12 @@ export class PluginMarketService {
         skip(removal, 'unsupported-action');
         continue;
       }
-      const prefilterReason = ledgerGateReason(snapshotInstallation({ installations: snapshot }, removal), removal);
+      const prefilterIdentity = removalIdentity(removal, snapshot);
+      if (!prefilterIdentity) {
+        skip(removal, 'ambiguous-namespace');
+        continue;
+      }
+      const prefilterReason = ledgerGateReason(snapshotInstallation({ installations: snapshot }, prefilterIdentity), removal);
       if (prefilterReason) {
         skip(removal, prefilterReason);
         continue;
@@ -2817,12 +2839,15 @@ export class PluginMarketService {
       try {
         const removed = await this.withMutation(removal.pluginId, async () => {
           requireSameMarketOwner(owner);
-          const record = ledger.installationForPlugin(removal);
+          const current = ledger.read().installations;
+          const resolved = removalIdentity(removal, current);
+          if (!resolved) return skip(removal, 'ambiguous-namespace');
+          const record = snapshotInstallation({ installations: current }, resolved);
           const reason = ledgerGateReason(record, removal);
           if (reason) return skip(removal, reason);
 
           removalGhosts ??= getGhostManager().list();
-          const installed = snapshotGhost({ ghosts: removalGhosts, installations: {}, manifestIdentityByStoragePart: new Map() }, removal);
+          const installed = snapshotGhost({ ghosts: removalGhosts, installations: {}, manifestIdentityByStoragePart: new Map() }, resolved);
           if (!installed) return skip(removal, 'runtime-not-installed');
           // 溯源摘要闸:账本记录只证明"市场装过这个 ghostId",不证明现在占位的
           // 还是那份包——本地 .cindy 可原位替换,替换不写市场账本。摘要对不上
