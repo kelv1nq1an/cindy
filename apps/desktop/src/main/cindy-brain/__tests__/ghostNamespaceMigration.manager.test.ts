@@ -480,14 +480,104 @@ describe('GhostManager namespace migration census', () => {
     expect(manager.list()).toEqual([]);
     await plantLegacyInstall('recovered');
     await plantLegacyInstall('unverified');
-    expect(manager.list().find((ghost) => ghost.manifest.id === 'recovered')?.namespaceMigration).toBeUndefined();
+    expect(manager.list().find((ghost) => ghost.manifest.id === 'recovered')?.namespaceMigration).toBe('pending');
     manager.captureRecoveredLegacyNamespace(['recovered']);
     expect(manager.list().find((ghost) => ghost.manifest.id === 'recovered')?.namespaceMigration).toBe('pending');
-    expect(manager.list().find((ghost) => ghost.manifest.id === 'unverified')?.namespaceMigration).toBeUndefined();
+    expect(manager.list().find((ghost) => ghost.manifest.id === 'unverified')?.namespaceMigration).toBe('pending');
     const orgCindy = await makeCindy('recovered');
     await expect(manager.install(orgCindy, { namespace: 'acme' })).resolves.toMatchObject({
       rejection: { code: 'namespace-migration-pending' },
     });
+  });
+
+  it('recovers an organization install whose approved namespace was erased by a downgraded client', async () => {
+    await plantLegacyInstall('hello');
+    await manager.commitPendingNamespace('hello', 'acme', 'market-organization');
+    const store = new GhostInstallReceiptStore(() => path.join(workDir, 'ghosts-install-state'));
+    const approval = store.read('hello');
+    expect(approval.state).toBe('approved');
+    if (approval.state !== 'approved') return;
+    const { namespace: oldNamespace, ...downgradedReceipt } = approval.receipt;
+    expect(oldNamespace).toBe('acme');
+    await store.write(downgradedReceipt, { relId: 'hello', requireSkillSnapshot: false });
+    expect(manager.list()[0]).toMatchObject({ namespaceMigration: 'pending' });
+    expect(manager.readDeliveryNamespace('hello')).toBeUndefined();
+    const orgCindy = await makeCindy('hello');
+    await expect(manager.install(orgCindy, { namespace: 'acme' })).resolves.toMatchObject({
+      rejection: { code: 'namespace-migration-pending' },
+    });
+
+    manager = new GhostManager({
+      getRootDir: () => rootDir,
+      mutateSnapshot: async ({ parentDir, ...request }) => {
+        await runGhostSnapshotWorkerRequest(request, parentDir);
+      },
+      recoverUnstampedOrganizationNamespace: () => 'acme',
+      classifyPendingNamespace: () => ({ kind: 'commit', namespace: 'acme', basis: 'market-organization' }),
+    });
+    await manager.reconcilePendingRootNamespaces(false);
+    expect(manager.list()[0]?.namespaceMigration).toBe('pending');
+    await manager.reconcilePendingRootNamespaces(true);
+    expect(manager.list()[0]).toMatchObject({ namespace: 'acme' });
+    expect(manager.list()[0]?.namespaceMigration).toBeUndefined();
+    expect(manager.readDeliveryNamespace('hello')).toBe('acme');
+  });
+
+  it('does not claim a post-census downgrade install without verified market evidence', async () => {
+    await fs.promises.mkdir(rootDir, { recursive: true });
+    manager.list();
+    await plantLegacyInstall('hello');
+    manager = new GhostManager({
+      getRootDir: () => rootDir,
+      recoverUnstampedOrganizationNamespace: () => null,
+      classifyPendingNamespace: () => ({ kind: 'commit', namespace: null, basis: 'manual-after-sync' }),
+    });
+    await manager.reconcilePendingRootNamespaces(true);
+    expect(manager.list()[0]?.namespaceMigration).toBe('pending');
+    expect(manager.readDeliveryNamespace('hello')).toBeUndefined();
+    const orgCindy = await makeCindy('hello');
+    await expect(manager.install(orgCindy, { namespace: 'acme' })).resolves.toMatchObject({
+      rejection: { code: 'namespace-migration-pending' },
+    });
+  });
+
+  it('resumes a post-census unstamped resident offline without assigning it root identity', async () => {
+    await fs.promises.mkdir(rootDir, { recursive: true });
+    manager.list();
+    await plantLegacyInstall('hello');
+    const resumed = vi.fn((ghost: InstalledGhost) => ghost.namespaceMigration);
+    manager = new GhostManager({
+      getRootDir: () => rootDir,
+      canResumePendingResidentOffline: () => true,
+      onResumePendingResidentOffline: resumed,
+    });
+    manager.resumePendingResidentsOffline();
+    expect(resumed).toHaveBeenCalledOnce();
+    expect(resumed.mock.results[0]?.value).toBe('pending');
+  });
+
+  it('finishes the captured downgrade recovery when receipt writing preceded ledger commit', async () => {
+    await fs.promises.mkdir(rootDir, { recursive: true });
+    manager.list();
+    await plantLegacyInstall('hello');
+    let failOnce = true;
+    manager = new GhostManager({
+      getRootDir: () => rootDir,
+      mutateSnapshot: async ({ parentDir, ...request }) => {
+        await runGhostSnapshotWorkerRequest(request, parentDir);
+      },
+      recoverUnstampedOrganizationNamespace: () => 'acme',
+      classifyPendingNamespace: () => ({ kind: 'commit', namespace: 'acme', basis: 'market-organization' }),
+      onNamespaceCommitted: () => {
+        if (failOnce) throw new Error('ledger unavailable');
+      },
+    });
+    await expect(manager.reconcilePendingRootNamespaces(true)).rejects.toThrow('ledger unavailable');
+    expect(manager.list()[0]).toMatchObject({ namespace: 'acme', namespaceMigration: 'pending' });
+    failOnce = false;
+    await manager.reconcilePendingRootNamespaces(true);
+    expect(manager.list()[0]).toMatchObject({ namespace: 'acme' });
+    expect(manager.list()[0]?.namespaceMigration).toBeUndefined();
   });
 
   it('keeps a receipt-stamped namespace pending until its market record is stamped', async () => {
@@ -529,10 +619,10 @@ describe('GhostManager namespace migration census', () => {
     expect('ghost' in installed).toBe(true);
     const helperGhost = (installed as { ghost: { manifest: { id: string }; namespace?: unknown } }).ghost;
     expect(helperGhost.manifest.id).toBe('helper');
-    expect(Object.prototype.hasOwnProperty.call(helperGhost, 'namespace')).toBe(false);
+    expect(helperGhost).toHaveProperty('namespace', null);
     const helper = manager.list().find((ghost) => ghost.manifest.id === 'helper');
     expect(helper).toBeDefined();
-    expect(Object.prototype.hasOwnProperty.call(helper, 'namespace')).toBe(false);
+    expect(helper).toHaveProperty('namespace', null);
     expect(helper?.namespaceMigration).toBeUndefined();
   });
 

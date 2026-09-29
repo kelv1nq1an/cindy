@@ -395,6 +395,7 @@ import {
 } from '../plugin-market/ledger.js';
 import {
   installedMarketManifestIdentity,
+  verifiedUnstampedOrganizationNamespace,
   type InstalledMarketManifestIdentity,
 } from '../plugin-market/installedManifestIdentity.js';
 import { createOrganizationPrefixStore } from '../plugin-market/organizationPrefixStore.js';
@@ -1760,6 +1761,7 @@ export function getGhostManager(): GhostManager {
         isGhostTokenBrokerAuthorized(manifest.id, 'install'),
       classifyPendingNamespace: (ghostId, marketSyncCompleted) =>
         classifyPendingNamespaceForGhost(ghostId, marketSyncCompleted === true),
+      recoverUnstampedOrganizationNamespace: recoverUnstampedOrganizationNamespace,
       isNamespaceMigrationBusy: (ghostId) => isNamespaceMigrationBusy(ghostId),
       canResumePendingResidentOffline: (ghostId) => canResumePendingResidentOffline(ghostId),
       onResumePendingResidentOffline: (ghost) => {
@@ -3143,6 +3145,24 @@ function classifyPendingNamespaceForGhost(
     marketRecord,
     currentOrganization,
   });
+}
+
+function recoverUnstampedOrganizationNamespace(ghostId: string): string | null {
+  try {
+    const state = getAuthState();
+    const user = state.isAuthenticated ? state.user : null;
+    const snapshot = readInstalledGhostManifestSnapshot(
+      path.join(brainRootDir(), ghostId), GHOST_INSTALL_MANIFEST_MAX_BYTES);
+    return verifiedUnstampedOrganizationNamespace({
+      records: getPluginMarketLedger().installationsForGhost(ghostId),
+      organizationId: user?.membershipKind === 'org' ? user.orgId ?? null : null,
+      orgSlug: user?.membershipKind === 'org' ? user.orgSlug ?? null : null,
+      evidence: getGhostManager().approvedInstallEvidence(ghostId),
+      identity: snapshot.ok ? installedMarketManifestIdentity(snapshot.snapshot) : null,
+    });
+  } catch {
+    return null;
+  }
 }
 
 /** Read Manifest and byte identity together from one installed ghost.json snapshot. */

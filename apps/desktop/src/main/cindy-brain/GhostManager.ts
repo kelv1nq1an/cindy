@@ -70,6 +70,7 @@ import {
   dropNamespaceMigrationEntry,
   type NamespaceCensusCandidate,
   isPendingNamespaceGhost,
+  isCensusCandidate,
   pendingNamespaceGhostIds,
   planNamespaceCommit,
   namespaceMigrationFilePath,
@@ -250,6 +251,8 @@ export interface GhostManagerOptions {
     ghostId: string,
     marketSyncCompleted?: boolean,
   ) => NamespaceClassification;
+  /** Only return an organization namespace after matching approved package and market provenance. */
+  recoverUnstampedOrganizationNamespace?: (ghostId: string) => string | null;
   /** True when runtime/OAuth/install work should delay a first-time namespace stamp. */
   isNamespaceMigrationBusy?: (ghostId: string) => boolean;
   canResumePendingResidentOffline?: (ghostId: string) => boolean;
@@ -672,7 +675,7 @@ export class GhostManager {
     if (existing && hasDeliveryNamespace(existing)) {
       return { namespace: existing.namespace };
     }
-    return {};
+    return existing === null ? { namespace: null } : {};
   }
 
   private rootInstallCensusCandidates(): NamespaceCensusCandidate[] {
@@ -775,7 +778,15 @@ export class GhostManager {
   ): ReturnType<typeof resolveInstallAgainstPending> {
     const ledger = this.loadNamespaceMigrationLedger();
     const pending = ledger ? isPendingNamespaceGhost(ledger, ghostId) : false;
-    if (!pending && ledger) return { kind: 'proceed' };
+    if (!pending && ledger) {
+      const approval = this.readApproval(ghostId);
+      if (approval.state !== 'approved' || hasDeliveryNamespace(approval.receipt)) {
+        return { kind: 'proceed' };
+      }
+      return resolveInstallAgainstPending({
+        ghostId, requestedNamespace, pending: true, classification: null,
+      });
+    }
     if (!ledger) {
       const approval = this.readApproval(ghostId);
       const legacy =
@@ -801,7 +812,21 @@ export class GhostManager {
     const ledger = this.ensureNamespaceMigrationCensus();
     if (!ledger) return;
     const ownerContextKey = this.currentOwnerContextKey();
-    for (const ghostId of pendingNamespaceGhostIds(ledger)) {
+    if (marketSyncCompleted && this.options.recoverUnstampedOrganizationNamespace) {
+      for (const candidate of this.rootInstallCensusCandidates()) {
+        if (this.currentOwnerContextKey() !== ownerContextKey) return;
+        if (isPendingNamespaceGhost(ledger, candidate.ghostId) ||
+            !isCensusCandidate(candidate) ||
+            this.hasPendingMutationJournal(candidate.ghostId)) continue;
+        const namespace = this.options.recoverUnstampedOrganizationNamespace(candidate.ghostId);
+        if (!namespace) continue;
+        const latest = this.loadNamespaceMigrationLedger();
+        if (!latest) return;
+        const captured = captureRecoveredNamespaceEntry(latest, candidate, new Date().toISOString());
+        if (captured !== latest) this.namespaceMigrationStore().write(captured);
+      }
+    }
+    for (const ghostId of pendingNamespaceGhostIds(this.loadNamespaceMigrationLedger() ?? ledger)) {
       if (this.currentOwnerContextKey() !== ownerContextKey) return;
       try {
         if (marketSyncCompleted) {
@@ -838,12 +863,11 @@ export class GhostManager {
     if (!ledger || !this.options.canResumePendingResidentOffline ||
         !this.options.onResumePendingResidentOffline) return;
     const ghosts = this.list();
-    for (const ghostId of pendingNamespaceGhostIds(ledger)) {
-      const ghost = ghosts.find((candidate) =>
-        candidate.manifest.id === ghostId && candidate.dir === this.contentPath(ghostId) &&
-        candidate.namespaceMigration === 'pending' && candidate.enabled &&
-        candidate.approval.state === 'approved');
-      if (!ghost || this.hasPendingMutationJournal(ghostId)) continue;
+    for (const ghost of ghosts) {
+      const ghostId = ghost.manifest.id;
+      if (ghost.dir !== this.contentPath(ghostId) ||
+          ghost.namespaceMigration !== 'pending' || !ghost.enabled ||
+          ghost.approval.state !== 'approved' || this.hasPendingMutationJournal(ghostId)) continue;
       const approval = this.readApproval(ghostId);
       if (approval.state !== 'approved' || hasDeliveryNamespace(approval.receipt)) continue;
       if (this.options.canResumePendingResidentOffline(ghostId)) {
@@ -1666,7 +1690,8 @@ export class GhostManager {
     const identity = parsePluginInstallRelId(id);
     if (!identity || identity.namespace !== null) return false;
     const ledger = this.loadNamespaceMigrationLedger();
-    return isPendingNamespaceGhost(ledger, id) &&
+    return (isPendingNamespaceGhost(ledger, id) ||
+      this.readApproval(id).state === 'approved') &&
       this.readDeliveryNamespace(id) === undefined;
   }
 
@@ -2456,9 +2481,9 @@ export class GhostManager {
           ...(identity.namespace !== null || (approvalResult.state === 'approved' && hasDeliveryNamespace(approvalResult.receipt))
             ? { namespace: identity.namespace !== null ? identity.namespace : approvalResult.receipt.namespace }
             : {}),
-          ...(identity.namespace === null && (namespaceLedger
-            ? isPendingNamespaceGhost(namespaceLedger, identity.ghostId)
-            : !hasDeliveryNamespace(receipt)) ? { namespaceMigration: 'pending' as const } : {}),
+          ...(identity.namespace === null && (isPendingNamespaceGhost(namespaceLedger, identity.ghostId) ||
+            !hasDeliveryNamespace(receipt))
+            ? { namespaceMigration: 'pending' as const } : {}),
           enabled: this.effectiveEnabled(dir, receipt.enabled),
           approval: { state: 'approved', revision: receipt.revision },
           trust: receipt.trust,

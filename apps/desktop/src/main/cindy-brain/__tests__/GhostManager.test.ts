@@ -2692,17 +2692,17 @@ describe('GhostManager · install', () => {
     expect(onChanged.mock.calls[0][0].map((c: InstalledGhost) => c.manifest.id)).toEqual(['hello']);
   });
 
-  it('omits namespace from receipts when install did not receive one', async () => {
+  it('stamps root identity when install did not receive a namespace', async () => {
     const cindy = await makeCindy('hello.cindy', goodManifest());
     const result = await manager.install(cindy);
     expect('ghost' in result).toBe(true);
     const { ghost } = result as { ghost: InstalledGhost };
-    expect(Object.prototype.hasOwnProperty.call(ghost, 'namespace')).toBe(false);
-    expect(Object.prototype.hasOwnProperty.call(manager.list()[0]!, 'namespace')).toBe(false);
+    expect(ghost.namespace).toBeNull();
+    expect(manager.list()[0]!.namespace).toBeNull();
     const receipt = JSON.parse(
       fs.readFileSync(path.join(workDir, 'ghosts-install-state', 'hello.json'), 'utf8'),
     ) as { namespace?: unknown };
-    expect(Object.prototype.hasOwnProperty.call(receipt, 'namespace')).toBe(false);
+    expect(receipt.namespace).toBeNull();
   });
 
   it('persists explicit root namespace when install receives null', async () => {
