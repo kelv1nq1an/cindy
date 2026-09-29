@@ -25,6 +25,19 @@ const ghostCall = (clientId: string, ghostId: string, toolName = 'mcp__cindy__gh
   }) as ChatMessage;
 
 describe('collectGhostCallsByUserTurn', () => {
+  it('does not merge root and organization calls with the same ghost id', () => {
+    const root = { ...ghostCall('t1', 'helper'), toolInput: { ghost_id: 'helper', namespace: null, tool: 'run' } };
+    const organization = { ...ghostCall('t2', 'helper'), toolInput: { ghost_id: 'helper', namespace: 'acme', tool: 'run' } };
+    const map = collectGhostCallsByUserTurn([user('u1'), root, organization]);
+    expect([...(map.get('u1') ?? [])].sort()).toEqual(['_ns__acme__helper', 'helper']);
+  });
+
+  it('keeps legacy unqualified calls and ignores malformed namespace inputs', () => {
+    const legacy = ghostCall('legacy', 'helper');
+    const malformed = { ...ghostCall('bad', 'helper'), toolInput: { ghost_id: 'helper', namespace: 'bad namespace', tool: 'run' } };
+    expect([...(collectGhostCallsByUserTurn([user('u1'), legacy]).get('u1') ?? [])]).toEqual(['helper']);
+    expect(collectGhostCallsByUserTurn([user('u1'), malformed]).has('u1')).toBe(false);
+  });
   it('把 ghost_call 归到其所在 turn 的 user 消息名下', () => {
     const map = collectGhostCallsByUserTurn([user('u1'), ghostCall('t1', 'art')]);
     expect([...(map.get('u1') ?? [])]).toEqual(['art']);

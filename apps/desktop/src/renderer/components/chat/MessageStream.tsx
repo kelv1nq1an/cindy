@@ -773,7 +773,9 @@ export function collectGhostCallsByUserTurn(
       m.toolInput &&
       typeof (m.toolInput as Record<string, unknown>).ghost_id === 'string'
     ) {
-      const gid = (m.toolInput as Record<string, unknown>).ghost_id as string;
+      const input = m.toolInput as Record<string, unknown>;
+      const gid = ghostCardInstanceId(input.ghost_id as string, input.namespace);
+      if (!gid) continue;
       const set = out.get(currentUserClientId) ?? new Set<string>();
       set.add(gid);
       out.set(currentUserClientId, set);
