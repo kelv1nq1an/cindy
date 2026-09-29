@@ -1743,7 +1743,8 @@ export function getCindyGhostsMcpDeps(
         return service.request(sessionId, target);
       }
       const workingDir = context?.workingDir ?? null;
-      const visible = classifyGhostVisibility(target.id, workingDir, ghostVisibilityDeps);
+      const visible = classifyGhostVisibility(target.id, workingDir, ghostVisibilityDeps,
+        target.kind === 'plugin' ? target.namespace : undefined);
       if (!visible.ok) return visible;
       const instanceId = installedGhostStoragePart(visible.ghost);
       const assessment = getGhostSetupAssessment(instanceId);
@@ -1766,7 +1767,8 @@ export function getCindyGhostsMcpDeps(
       });
       if (!result.ok) return result;
       if (signal?.aborted) return { ok: false, errorCode: 'SETUP_CANCELLED' };
-      const current = classifyGhostVisibility(instanceId, workingDir, ghostVisibilityDeps);
+      const current = classifyGhostVisibility(instanceId, workingDir, ghostVisibilityDeps,
+        target.namespace);
       if (!current.ok) return current;
       const final = getGhostSetupAssessment(instanceId);
       if (final.state !== 'ready') return { ok: false, errorCode: 'SETUP_REQUIRED' };

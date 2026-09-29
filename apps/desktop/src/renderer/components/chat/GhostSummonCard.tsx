@@ -281,9 +281,10 @@ export function GhostSummonCard({
     return identity ? findInstalledGhostByIdentity(installedGhosts, identity) : undefined;
   };
   const commandIdentity = directive.kind === 'command' &&
-    typeof commandNamespace === 'string' && isValidPluginNamespace(commandNamespace) &&
+    typeof commandNamespace === 'string' &&
+    (commandNamespace === '@root' || isValidPluginNamespace(commandNamespace)) &&
     isValidGhostId(directive.ghostId)
-    ? { namespace: commandNamespace, ghostId: directive.ghostId }
+    ? { namespace: commandNamespace === '@root' ? null : commandNamespace, ghostId: directive.ghostId }
     : null;
   const commandInstanceId = commandIdentity ? pluginStoragePart(commandIdentity) : null;
   const ghostForDirective = (ghostId: string) => commandIdentity && ghostId === commandIdentity.ghostId

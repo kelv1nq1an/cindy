@@ -24,6 +24,7 @@ import {
   formatInstalledGhostAmbiguity,
   hasDeliveryNamespace,
   installedGhostStoragePart,
+  pluginStoragePart,
   listGhostsByCommand,
 } from '../../shared/pluginIdentity';
 
@@ -34,7 +35,7 @@ import {
  * GHOST_SIGIL_CHARS 是同一字符集,两端必须保持一致。
  */
 const COMMAND_RE =
-  /^[$＄¥￥]([^/\s]{1,32})(?:\/([a-z0-9](?:[a-z0-9-]{0,126}[a-z0-9])?))?(?:\s|$)/;
+  /^[$＄¥￥]([^/\s]{1,32})(?:\/(@root|[a-z0-9](?:[a-z0-9-]{0,126}[a-z0-9])?))?(?:\s|$)/;
 
 export interface GhostCommandToken {
   word: string;
@@ -61,9 +62,13 @@ export function parseGhostCommandWord(text: string): string | null {
 export function formatGhostCommandToken(ghost: {
   manifest: { command?: string };
   namespace?: string | null;
-}): string | null {
+}, roster: readonly { manifest: { command?: string }; namespace?: string | null }[] = []): string | null {
   const command = ghost.manifest.command;
   if (!command) return null;
+  if (ghost.namespace === null && roster.some((other) =>
+    other !== ghost && other.manifest.command?.toLowerCase() === command.toLowerCase())) {
+    return command + '/@root';
+  }
   return hasDeliveryNamespace(ghost) && ghost.namespace
     ? `${command}/${ghost.namespace}`
     : command;
@@ -72,8 +77,8 @@ export function formatGhostCommandToken(ghost: {
 export function formatGhostCommandInsertion(ghost: {
   manifest: { command?: string };
   namespace?: string | null;
-}): string | null {
-  const token = formatGhostCommandToken(ghost);
+}, roster?: readonly { manifest: { command?: string }; namespace?: string | null }[]): string | null {
+  const token = formatGhostCommandToken(ghost, roster);
   return token ? `$${token}` : null;
 }
 
@@ -84,6 +89,7 @@ function listGhostsMatchingCommandToken(
 ): InstalledGhost[] {
   const matches = listGhostsByCommand(ghosts, token.word, enabledOnly);
   if (token.namespace === null) return matches;
+  if (token.namespace === '@root') return matches.filter((ghost) => ghost.namespace === null);
   return matches.filter((ghost) => ghost.namespace === token.namespace);
 }
 
@@ -137,7 +143,8 @@ export interface GhostDirectiveSegment {
 
 const DIRECT_GHOST_TOOL_HINT =
   '插件本身不会作为独立 MCP server/resource 出现;ghost_call 的完整工具名是 mcp__cindy__ghost_call。' +
-  '不得查询 MCP resources、插件文件、ghost.json、宿主进程或本地 API,直接调用 cindy 总机工具。';
+  '不得查询 MCP resources、插件文件、ghost.json、宿主进程或本地 API,直接调用 cindy 总机工具。' +
+  '若指令带 /@root，ghost_call 必须显式传 namespace:null。';
 
 /**
  * 硬指令追加段——分段形态(单一事实源):发送文本 = 各段 text 相连;
@@ -358,12 +365,15 @@ ${buildAmbiguousCommandDirective(token.word, matches)}`;
   const ghost = matches[0];
   if (!ghost) return text;
   const { name, command } = ghost.manifest;
-  const id = installedGhostStoragePart(ghost);
+  const id = ghost.namespace
+    ? pluginStoragePart({ namespace: ghost.namespace, ghostId: ghost.manifest.id })
+    : installedGhostStoragePart(ghost);
+  const commandToken = token.namespace === '@root' ? token.word + '/@root' : command as string;
   const toolsJson = buildGhostToolsJson(ghost.manifest.tools);
   const directive =
     toolsJson !== null
-      ? buildCommandToolsDirective(command as string, name, id, toolsJson)
-      : buildCommandDirective(command as string, name, id);
+      ? buildCommandToolsDirective(commandToken, name, id, toolsJson)
+      : buildCommandDirective(commandToken, name, id);
   return `${text}\n\n${directive}`;
 }
 
@@ -400,7 +410,7 @@ const P4 = String.fromCharCode(4);
 /** 由生成模板反推的解析正则——锚定消息末尾,只认完整模板(旧形态)。 */
 const COMMAND_DIRECTIVE_RE = new RegExp(
   `\\n\\n(${escapeRegExp(buildCommandDirective(P1, P2, P3))
-    .replace(P1, '(\\S{1,32})')
+    .replace(P1, '(\\S{1,161})')
     .replace(P2, '(.+?)')
     .replace(P3, '(.+?)')})$`,
 );
@@ -427,7 +437,7 @@ const LEGACY_COMMAND_DIRECTIVE_RE = new RegExp(
  *  不可能撞上占位符)。 */
 const COMMAND_TOOLS_DIRECTIVE_RE = new RegExp(
   `\\n\\n(${escapeRegExp(buildCommandToolsDirective(P1, P2, P3, P4))
-    .replace(P1, '(\\S{1,32})')
+    .replace(P1, '(\\S{1,161})')
     .replace(P2, '(.+?)')
     .replace(P3, '(.+?)')
     .replace(P4, '(.+)')})$`,

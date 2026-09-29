@@ -173,6 +173,27 @@ describe('GhostSummonCard(chip 形态)', () => {
     expect(screen.getByText('已完成')).toBeTruthy();
     expect(screen.queryByText('已调用')).toBeNull();
   });
+  it('resolves an explicit root command without attributing an organization call to it', () => {
+    installedGhostsMock.mockReturnValue([
+      { manifest: { id: 'helper', name: 'Root', version: '1' }, dir: '/tmp/helper', namespace: null },
+      { manifest: { id: 'helper', name: 'Organization', version: '2' }, dir: '/tmp/_ns/acme/helper', namespace: 'acme' },
+    ] as InstalledGhost[]);
+    const directive = { kind: 'command', command: 'draw/@root', name: 'Root', ghostId: 'helper', raw: '' } as const;
+    const { rerender } = render(
+      <GhostFulfillmentContext.Provider value={fulfillmentOf('m1', ['_ns__acme__helper'])}>
+        <GhostSummonCard directive={directive} commandNamespace='@root' messageClientId='m1' />
+      </GhostFulfillmentContext.Provider>,
+    );
+    expect(screen.getByText('已完成')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { expanded: false }));
+    expect(screen.getByText('v1')).toBeTruthy();
+    rerender(
+      <GhostFulfillmentContext.Provider value={fulfillmentOf('m1', ['helper'])}>
+        <GhostSummonCard directive={directive} commandNamespace='@root' messageClientId='m1' />
+      </GhostFulfillmentContext.Provider>,
+    );
+    expect(screen.getByText('已调用')).toBeTruthy();
+  });
   it('resolves a namespaced $command instance id to the live install version', () => {
     installedGhostsMock.mockReturnValue([
       {

@@ -2711,11 +2711,12 @@ export class PluginMarketService {
     ledger: PluginMarketLedger,
     owner: ActiveAppSession,
   ): Promise<void> {
-    const record = ledger.installationForGhost('cindy-github');
+    const record = ledger.installationForIdentity({ namespace: null, ghostId: 'cindy-github' });
     requireSameMarketOwner(owner);
     const installed = getGhostManager()
       .list()
-      .find((ghost) => ghost.manifest.id === 'cindy-github');
+      .find((ghost) => ghost.manifest.id === 'cindy-github' && ghost.namespace == null &&
+        ghost.namespaceMigration !== 'pending');
     if (!record || !installed || !canBackfillOfficialCindyGithubTrust(record, installed)) return;
     const tempPath = path.join(
       app.getPath('temp'),
@@ -2737,10 +2738,11 @@ export class PluginMarketService {
       requireSameMarketOwner(owner);
       await withGhostInstallLock('cindy-github', async () => {
         requireSameMarketOwner(owner);
-        const currentRecord = ledger.installationForGhost('cindy-github');
+        const currentRecord = ledger.installationForIdentity({ namespace: null, ghostId: 'cindy-github' });
         const currentInstalled = getGhostManager()
           .list()
-          .find((ghost) => ghost.manifest.id === 'cindy-github');
+          .find((ghost) => ghost.manifest.id === 'cindy-github' && ghost.namespace == null &&
+            ghost.namespaceMigration !== 'pending');
         if (
           !currentRecord?.installed ||
           currentRecord.source !== 'market' ||
@@ -2912,14 +2914,22 @@ export class PluginMarketService {
     const uniqueGhostIds = new Set(
       plugins.filter((plugin) => counts.get(plugin.ghostId) === 1).map((plugin) => plugin.ghostId),
     );
+    const identityCounts = new Map<string, number>();
+    for (const plugin of plugins) {
+      const key = pluginLedgerRecordKey(plugin);
+      identityCounts.set(key, (identityCounts.get(key) ?? 0) + 1);
+    }
     const ledgerData = ledger.read();
     const local = this.localInstallSnapshot(ledger, ledgerData.installations);
     for (const summary of plugins) {
-      if (!summary.defaultInstall || !uniqueGhostIds.has(summary.ghostId)) continue;
+      if (!summary.defaultInstall ||
+          (!uniqueGhostIds.has(summary.ghostId) &&
+            (!hasDeliveryNamespace(summary) || identityCounts.get(pluginLedgerRecordKey(summary)) !== 1))) continue;
       if (!isGhostAvailableForActiveSession(summary.ghostId)) continue;
       if (ledgerData.defaultInstallOptOuts[installSubject]?.includes(summary.id)) continue;
       if (isBuiltinGhostRemovedByUser(summary.ghostId)) continue;
       const state = this.toItem(summary, local).installState;
+      if (state === 'conflict' && !uniqueGhostIds.has(summary.ghostId)) continue;
       if (state !== 'not-installed' && state !== 'conflict') continue;
       const takeoverRetryKey = this.automaticUpgradeRetryKey(
         owner,

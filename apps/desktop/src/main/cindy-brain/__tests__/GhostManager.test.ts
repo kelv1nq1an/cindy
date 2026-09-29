@@ -2758,6 +2758,19 @@ describe('GhostManager · install', () => {
       [null, 'hello'],
     ]);
   });
+  it('refuses a linked namespace parent before installing or uninstalling outside the managed root', async () => {
+    const outside = path.join(workDir, 'outside-namespaces');
+    await fs.promises.mkdir(outside, { recursive: true });
+    await fs.promises.mkdir(rootDir, { recursive: true });
+    try {
+      await fs.promises.symlink(outside, path.join(rootDir, '_ns'), process.platform === 'win32' ? 'junction' : 'dir');
+    } catch {
+      return;
+    }
+    const file = await makeCindy('linked-ns.cindy', goodManifest());
+    await expect(manager.install(file, { namespace: 'acme' })).rejects.toThrow(/namespace parent/);
+    expect(fs.existsSync(path.join(outside, 'acme', 'hello'))).toBe(false);
+  });
 
 
   it('reads namespaced receipts from storage part and install rel id', async () => {

@@ -4436,7 +4436,7 @@ export function ChatInput({
         (g) =>
           ({
             kind: 'desktop',
-            name: formatGhostCommandToken(g)!,
+            name: formatGhostCommandToken(g, ghostsForCommand)!,
             description: `${g.manifest.name} · ${t('settings.ghosts.commandPaletteTag')}${g.namespace ? ` · ${g.namespace}` : ''}`,
           }) as UnifiedCommand,
       );
@@ -5669,7 +5669,7 @@ export function ChatInput({
         const markRecentPluginUsage = () => {
           if (!usedGhost || recentUsageMarked) return;
           recentUsageMarked = true;
-          void window.electronAPI.ghosts.markUsed(usedGhost.manifest.id).catch((error) => {
+          void window.electronAPI.ghosts.markUsed(installedGhostStoragePart(usedGhost)).catch((error) => {
             log.warn(
               'failed to persist recent Plugin usage:',
               error instanceof Error ? error.message : String(error),

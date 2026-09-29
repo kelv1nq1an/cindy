@@ -74,7 +74,7 @@ export function placeGhostAtComposerStart(
   ghost: InstalledGhost,
   installedRoster: readonly InstalledGhost[],
 ): boolean {
-  const insertion = formatGhostCommandInsertion(ghost);
+  const insertion = formatGhostCommandInsertion(ghost, installedRoster);
   if (!insertion || editor.isDestroyed || !editor.isEditable) return false;
 
   const { doc } = editor.state;

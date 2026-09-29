@@ -58,6 +58,7 @@ function harness() {
             card.sessionId === sessionId &&
             card.target.kind === target.kind &&
             card.target.id === target.id &&
+            (card.target.kind !== 'plugin' || card.target.namespace === (target.kind === 'plugin' ? target.namespace : undefined)) &&
             !!card.target.reauthorize === !!target.reauthorize &&
             !card.snapshot.terminal,
         ) ?? null,
@@ -140,6 +141,17 @@ describe('Bot authorization transcript lifecycle (Grok parity)', () => {
     expect(h.adapter.execute).not.toHaveBeenCalled();
     expect(await h.service.request('s', { kind: 'host', id: 'grok' })).toEqual(result);
     expect(h.stored.size).toBe(1);
+    await h.service.dispose();
+  });
+  it('keeps root and organization authorization cards separate for the same id', async () => {
+    const h = harness();
+    const root = await h.service.request('s', { kind: 'plugin', id: 'p', namespace: null });
+    const organization = await h.service.request('s', { kind: 'plugin', id: 'p', namespace: 'acme' });
+    expect(root).toMatchObject({ ok: false, errorCode: 'SETUP_REQUIRED' });
+    expect(organization).toMatchObject({ ok: false, errorCode: 'SETUP_REQUIRED' });
+    expect(h.stored.size).toBe(2);
+    expect([...h.stored.values()].map((card) => card.target.kind === 'plugin' ? card.target.namespace : undefined))
+      .toEqual([null, 'acme']);
     await h.service.dispose();
   });
   it('an old unclicked card remains usable after the one-hour fallback expires', async () => {

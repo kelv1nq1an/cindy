@@ -7,7 +7,7 @@ import { assertRemoteBotInvocationAllowed } from '../device-link/remoteBotSessio
 import { remoteResourceRegistry, RemoteResourceRegistryError, type RemoteResourceProvider } from '../device-link/remoteResourceRegistry.js';
 import { captureDataOwnerBroadcastScope, isDataOwnerBroadcastScopeCurrent, tapWindowBroadcast, getSafeDataOwnerPushStamp } from '../device-link/broadcast-tap.js';
 import { isValidGhostId } from '../../shared/ghost.js';
-import { createPluginLogicalIdentity, findInstalledGhostByIdentity } from '../../shared/pluginIdentity.js';
+import { createPluginLogicalIdentity, findInstalledGhostByIdentity, findInstalledGhostByInstanceId, isGhostInstanceId } from '../../shared/pluginIdentity.js';
 
 const COLLECTION = 'plugin-results';
 const KIND = 'card';
@@ -15,6 +15,9 @@ const KIND = 'card';
 export function findGhostForRemotePluginIdentity<T extends { manifest: { id: string }; namespace?: string | null }>(
   ghosts: readonly T[], id: string,
 ): T | undefined {
+  if (isGhostInstanceId(id) && !isValidGhostId(id)) {
+    return findInstalledGhostByInstanceId(ghosts, id);
+  }
   if (!id.startsWith('[')) {
     const matches = ghosts.filter((ghost) => ghost.manifest.id === id);
     return matches.length === 1 ? matches[0] : undefined;

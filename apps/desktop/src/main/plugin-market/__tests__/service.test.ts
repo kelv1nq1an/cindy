@@ -1431,6 +1431,25 @@ describe('PluginMarketService migration and defaultInstall', () => {
       manifestDigest: ghostManifestDigest(manifest()),
     });
   });
+  it('installs a namespaced default even when a public catalog entry shares the ghostId', async () => {
+    const publicItem = summary({ ghostId: 'helper', namespace: null });
+    const orgItem = summary({
+      id: 'c'.repeat(25), ghostId: 'helper', namespace: 'acme', scope: 'organization',
+      organizationId: 'org-1', defaultInstall: true,
+    });
+    const h = harness([publicItem, orgItem]);
+    runtime.install.mockImplementationOnce(async () => {
+      const ghost = { manifest: manifest('helper'), namespace: 'acme',
+        dir: '/userData/cindy-brain/_ns/acme/helper', enabled: true };
+      runtime.ghosts = [ghost];
+      return ghost;
+    });
+    await h.service.snapshot();
+    expect(runtime.install).toHaveBeenCalledWith(expect.any(String),
+      expect.objectContaining({ ghostId: 'helper', namespace: 'acme' }));
+    expect(h.ledger.installationForIdentity({ namespace: 'acme', ghostId: 'helper' }))
+      .toMatchObject({ installed: true, pluginId: orgItem.id });
+  });
 
   it('installs a default package whose detail manifest contains normalized setup requirements', async () => {
     const item = summary({ defaultInstall: true });
@@ -1947,6 +1966,17 @@ describe('PluginMarketService migration and defaultInstall', () => {
       installed: true,
       updatedAt: '2026-08-07T00:00:00.000Z',
       manifestDigest: digest,
+    });
+    h.ledger.upsertInstallation({
+      ...recordForTest(item), pluginId: 'c'.repeat(25), namespace: 'acme',
+      scope: 'organization', organizationId: 'org-1',
+    });
+    runtime.ghosts.unshift({
+      manifest: rawManifest,
+      namespace: 'acme',
+      dir: '/userData/cindy-brain/_ns/acme/cindy-github',
+      enabled: true,
+      trust: { level: 'unverified', publisherSigned: false, publisherVerified: false, reviewed: false },
     });
 
     runtime.install.mockResolvedValue({

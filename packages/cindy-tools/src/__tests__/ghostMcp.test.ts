@@ -2139,6 +2139,8 @@ describe('Cindy market MCP transport', () => {
       await client.callTool({ name: 'ghost_info', arguments: { ghost_id: 'art' } });
       await client.callTool({ name: 'connect_account', arguments: { kind: 'plugin', id: 'art' } });
       expect(connectAccount).toHaveBeenCalledWith({ kind: 'plugin', id: 'art', reauthorize: undefined }, expect.any(AbortSignal));
+      await client.callTool({ name: 'connect_account', arguments: { kind: 'plugin', id: 'art', namespace: null } });
+      expect(connectAccount).toHaveBeenCalledWith({ kind: 'plugin', id: 'art', namespace: null, reauthorize: undefined }, expect.any(AbortSignal));
       expect(callGhostTool).not.toHaveBeenCalled();
       // Host authorization continuation retries the original work through the same gateway.
       await client.callTool({ name: 'ghost_call', arguments: { ghost_id: 'art', tool: 'gen_image', args: {} } });

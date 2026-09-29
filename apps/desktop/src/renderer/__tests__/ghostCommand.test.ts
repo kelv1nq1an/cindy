@@ -57,6 +57,7 @@ describe('parseGhostCommandWord', () => {
   it('optional /namespace qualifier is not part of the command word', () => {
     expect(parseGhostCommandWord('$draw/acme a cat')).toBe('draw');
     expect(parseGhostCommandToken('$draw/acme a cat')).toEqual({ word: 'draw', namespace: 'acme' });
+    expect(parseGhostCommandToken('$draw/@root a cat')).toEqual({ word: 'draw', namespace: '@root' });
     expect(parseGhostCommandToken('$画图/acme 一只猫')).toEqual({ word: '画图', namespace: 'acme' });
     expect(parseGhostCommandToken('$draw')).toEqual({ word: 'draw', namespace: null });
     expect(parseGhostCommandToken('$draw/')).toBeNull();
@@ -130,6 +131,15 @@ describe('expandGhostCommand', () => {
     const ambiguous = expandGhostCommand('$draw a cat', [root, org]);
     expect(ambiguous).toContain('存在多个实例');
     expect(expandGhostCommand('$draw/globex a cat', [root, org])).toBe('$draw/globex a cat');
+  });
+  it('preserves a selected root and an in-place organization identity with the same command', () => {
+    const root = ghost('draw', true, { id: 'art', namespace: null });
+    const org = { ...ghost('draw', true, { id: 'art', namespace: 'acme' }), dir: '/fake/art' };
+    expect(formatGhostCommandInsertion(root, [root, org])).toBe('$draw/@root');
+    expect(expandGhostCommand('$draw/@root a cat', [root, org])).toContain('id: art');
+    expect(expandGhostCommand('$draw/@root a cat', [root, org])).toContain('namespace:null');
+    expect(expandGhostCommand('$draw/@root a cat', [root, org])).not.toContain('存在多个实例');
+    expect(expandGhostCommand('$draw/acme a cat', [root, org])).toContain('id: _ns__acme__art');
   });
 });
 

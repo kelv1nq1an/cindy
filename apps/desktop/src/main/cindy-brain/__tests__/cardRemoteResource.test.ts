@@ -68,6 +68,8 @@ describe('plugin identity for mobile annotations', () => {
     const org = { manifest: { id: 'helper' }, namespace: 'acme', name: 'Organization' };
     expect(findGhostForRemotePluginIdentity([root, org], JSON.stringify([null, 'helper']))).toBe(root);
     expect(findGhostForRemotePluginIdentity([root, org], JSON.stringify(['acme', 'helper']))).toBe(org);
+    expect(findGhostForRemotePluginIdentity([root, org], '_ns__acme__helper')).toBe(org);
+    expect(findGhostForRemotePluginIdentity([root, org], '_ns/acme/helper')).toBe(org);
     expect(findGhostForRemotePluginIdentity([root, org], 'helper')).toBeUndefined();
     expect(findGhostForRemotePluginIdentity([org], 'helper')).toBe(org);
     expect(findGhostForRemotePluginIdentity([root, org], JSON.stringify(['other', 'helper']))).toBeUndefined();

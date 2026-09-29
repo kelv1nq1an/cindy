@@ -1750,6 +1750,14 @@ export function getGhostManager(): GhostManager {
       isNamespaceMigrationBusy: (ghostId) => isNamespaceMigrationBusy(ghostId),
       onNamespaceCommitted: (ghostId, namespace) => {
         getPluginMarketLedger().stampNamespaceIfAbsent(ghostId, namespace);
+        const ownerKey = activeOwnerScopeKey();
+        queueMicrotask(() => {
+          if (activeOwnerScopeKey() !== ownerKey) return;
+          const ghost = managerSingleton?.list().find((candidate) =>
+            candidate.manifest.id === ghostId && candidate.namespace === namespace &&
+            candidate.namespaceMigration !== 'pending');
+          if (ghost) spawnIfResident(ghost);
+        });
       },
       onBeforePhysicalRelocate: async (fromRelId) => {
         const ghost = findGhostForInstanceId(fromRelId);

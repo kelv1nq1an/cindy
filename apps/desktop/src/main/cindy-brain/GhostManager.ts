@@ -635,7 +635,22 @@ export class GhostManager {
   }
 
   private contentPath(relId: string): string {
-    return path.join(this.contentRootDir(), ...relId.split('/'));
+    const root = this.contentRootDir();
+    const parts = relId.split('/');
+    if (parts.length > 1) {
+      let parent = root;
+      for (const part of parts.slice(0, -1)) {
+        parent = path.join(parent, part);
+        try {
+          if (classifyGhostDirEntrySync(parent) !== 'directory') {
+            throw new Error('plugin namespace parent is not a real directory');
+          }
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        }
+      }
+    }
+    return path.join(root, ...parts);
   }
 
   private namespaceMigrationStore(): NamespaceMigrationStore {
@@ -855,9 +870,11 @@ export class GhostManager {
     const nsRoot = path.join(root, PLUGIN_NS_INSTALL_ROOT);
     let nsEntries: fs.Dirent[];
     try {
+      if (classifyGhostDirEntrySync(nsRoot) !== 'directory') return listed;
       nsEntries = fs.readdirSync(nsRoot, { withFileTypes: true });
-    } catch {
-      return listed;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return listed;
+      throw error;
     }
     for (const nsEntry of nsEntries) {
       if (nsEntry.name.startsWith('.')) continue;
@@ -3273,6 +3290,7 @@ export class GhostManager {
       return { rejection: { code: 'namespace-migration-pending', reason: pendingInstall.reason } };
     }
     await fs.promises.mkdir(path.dirname(finalDir), { recursive: true });
+    this.contentPath(relId);
 
     // 4.5) 显式指令查重(2026-07-09 Lizi 定案):command 由意识作者自定,
     // 与本机已装意识撞名即拒——不静默改名(确定性),由用户抽离旧的或

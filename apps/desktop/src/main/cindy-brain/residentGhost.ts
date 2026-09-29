@@ -12,7 +12,7 @@ export function spawnResidentGhost(ghost: InstalledGhost, deps: {
   spawnBrowser: (ghost: InstalledGhost) => Promise<{ ok: boolean; reason?: string }>;
   warn: (message: string, fields: Record<string, unknown>) => void;
 }): void {
-  if (!ghost.enabled || !deps.isAvailable(ghost.manifest.id)) return;
+  if (!ghost.enabled || ghost.namespaceMigration === 'pending' || !deps.isAvailable(ghost.manifest.id)) return;
   // Node residency remains an independent declaration; routine events do not expand it.
   if (ghost.manifest.node?.lifecycle === 'resident') {
     void deps.startNode(ghost).catch((error) => {

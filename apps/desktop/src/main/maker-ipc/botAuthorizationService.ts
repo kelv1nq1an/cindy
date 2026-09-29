@@ -128,7 +128,8 @@ export class BotAuthorizationService {
 
   private requests = new Map<string, ReturnType<BotAuthorizationService['requestCard']>>();
   request(sessionId: string, target: BotAuthorizationTarget, plan?: GhostSetupPlan) {
-    const key = `${this.epoch}:${sessionId}:${target.kind}:${target.id}:${!!target.reauthorize}`;
+    const key = JSON.stringify([this.epoch, sessionId, target.kind, target.id,
+      target.kind === 'plugin' ? target.namespace : undefined, !!target.reauthorize]);
     const existing = this.requests.get(key);
     if (existing) return existing;
     const pending = this.requestCard(sessionId, target, plan).finally(() =>
@@ -156,6 +157,7 @@ export class BotAuthorizationService {
         e.card.sessionId === sessionId &&
         e.card.target.kind === target.kind &&
         e.card.target.id === target.id &&
+        (e.card.target.kind !== 'plugin' || e.card.target.namespace === (target.kind === 'plugin' ? target.namespace : undefined)) &&
         !!e.card.target.reauthorize === !!target.reauthorize,
     );
     if (existing) {
