@@ -93,91 +93,46 @@ describe('censusNamespaceMigration', () => {
   });
 
   it('does not recensus a corrupt or unreadable ledger', () => {
-    expect(
-      censusNamespaceMigration({ kind: 'corrupt' }, [candidate('hello')], NOW),
-    ).toEqual({ kind: 'blocked', reason: 'corrupt' });
-    expect(
-      censusNamespaceMigration({ kind: 'unreadable' }, [candidate('hello')], NOW),
-    ).toEqual({ kind: 'blocked', reason: 'unreadable' });
+    for (const kind of ['corrupt', 'unreadable'] as const) {
+      expect(censusNamespaceMigration({ kind }, [candidate('hello')], NOW))
+        .toEqual({ kind: 'blocked', reason: kind });
+    }
   });
 });
 
 describe('classifyNamespaceMigration', () => {
   it('commits builtin and public/personal/custom market installs as root', () => {
-    expect(classify({ ghostId: 'cindy-art', builtin: true })).toEqual({
-      kind: 'commit',
-      namespace: null,
-      basis: 'builtin',
-    });
-    expect(
-      classify({
-        ghostId: 'helper',
-        marketRecord: { scope: 'public', source: 'market', organizationId: null },
-      }),
-    ).toEqual({ kind: 'commit', namespace: null, basis: 'market-public' });
-    expect(
-      classify({
-        ghostId: 'helper',
-        marketRecord: { scope: 'personal', source: 'market', organizationId: 'user-1' },
-      }),
-    ).toEqual({ kind: 'commit', namespace: null, basis: 'market-personal' });
-    expect(
-      classify({
-        ghostId: 'helper',
-        marketRecord: { scope: 'public', source: 'git-market', organizationId: null },
-      }),
-    ).toEqual({ kind: 'commit', namespace: null, basis: 'market-custom' });
+    const cases: [Partial<ClassifyNamespaceMigrationInput> & { ghostId: string }, string][] = [
+      [{ ghostId: 'cindy-art', builtin: true }, 'builtin'],
+      [{ ghostId: 'helper', marketRecord: { scope: 'public', source: 'market', organizationId: null } }, 'market-public'],
+      [{ ghostId: 'helper', marketRecord: { scope: 'personal', source: 'market', organizationId: 'user-1' } }, 'market-personal'],
+      [{ ghostId: 'helper', marketRecord: { scope: 'public', source: 'git-market', organizationId: null } }, 'market-custom'],
+    ];
+    for (const [input, basis] of cases) {
+      expect(classify(input)).toEqual({ kind: 'commit', namespace: null, basis });
+    }
   });
 
   it('commits organization installs in place when orgSlug is a trusted current-org fact', () => {
-    expect(
-      classify({
-        ghostId: 'xd-feishu',
-        marketRecord: {
-          scope: 'organization',
-          source: 'market',
-          organizationId: 'org-xd',
-          namespace: 'xd',
-        },
-        currentOrganization: { organizationId: 'org-xd', orgSlug: 'xd', pluginPrefix: 'xd' },
-      }),
-    ).toEqual({ kind: 'commit', namespace: 'xd', basis: 'market-organization' });
-    expect(
-      classify({
-        ghostId: 'helper',
-        marketRecord: {
-          scope: 'organization',
-          source: 'market',
-          organizationId: 'org-acme',
-        },
-        currentOrganization: { organizationId: 'org-acme', orgSlug: 'acme', pluginPrefix: 'acme' },
-      }),
-    ).toEqual({ kind: 'commit', namespace: 'acme', basis: 'market-organization' });
-    expect(
-      classify({
-        ghostId: 'helper',
-        marketRecord: {
-          scope: 'organization',
-          source: 'market',
-          organizationId: 'org-acme',
-        },
-        currentOrganization: { organizationId: 'org-other', orgSlug: 'other', pluginPrefix: 'oth' },
-      }),
-    ).toEqual({ kind: 'pending', reason: 'awaiting-organization-namespace' });
+    const cases: [Partial<ClassifyNamespaceMigrationInput> & { ghostId: string }, ReturnType<typeof classify>][] = [
+      [{ ghostId: 'xd-feishu', marketRecord: { scope: 'organization', source: 'market', organizationId: 'org-xd', namespace: 'xd' },
+        currentOrganization: { organizationId: 'org-xd', orgSlug: 'xd', pluginPrefix: 'xd' } },
+      { kind: 'commit', namespace: 'xd', basis: 'market-organization' }],
+      [{ ghostId: 'helper', marketRecord: { scope: 'organization', source: 'market', organizationId: 'org-acme' },
+        currentOrganization: { organizationId: 'org-acme', orgSlug: 'acme', pluginPrefix: 'acme' } },
+      { kind: 'commit', namespace: 'acme', basis: 'market-organization' }],
+      [{ ghostId: 'helper', marketRecord: { scope: 'organization', source: 'market', organizationId: 'org-acme' },
+        currentOrganization: { organizationId: 'org-other', orgSlug: 'other', pluginPrefix: 'oth' } },
+      { kind: 'pending', reason: 'awaiting-organization-namespace' }],
+    ];
+    for (const [input, expected] of cases) expect(classify(input)).toEqual(expected);
   });
 
   it('commits a known root namespace on the market record, and waits without market facts', () => {
-    expect(
-      classify({
-        ghostId: 'helper',
-        marketRecord: {
-          scope: 'public',
-          source: 'market',
-          organizationId: null,
-          namespace: null,
-        },
-      }),
-    ).toEqual({ kind: 'commit', namespace: null, basis: 'explicit-root' });
+    expect(classify({
+      ghostId: 'helper',
+      marketRecord: { scope: 'public', source: 'market', organizationId: null, namespace: null },
+    })).toEqual({ kind: 'commit', namespace: null, basis: 'explicit-root' });
     expect(classify({ ghostId: 'xd-feishu' })).toEqual({
       kind: 'pending',
       reason: 'awaiting-market-facts',
@@ -185,13 +140,10 @@ describe('classifyNamespaceMigration', () => {
   });
 
   it('commits explicit Forge self-tests to the current orgSlug', () => {
-    expect(
-      classify({
-        ghostId: 'acme-tool',
-        installOrigin: 'agent-forge',
-        currentOrganization: { organizationId: 'org-acme', orgSlug: 'acme', pluginPrefix: 'acme' },
-      }),
-    ).toEqual({ kind: 'commit', namespace: 'acme', basis: 'forge-current-org' });
+    expect(classify({
+      ghostId: 'acme-tool', installOrigin: 'agent-forge',
+      currentOrganization: { organizationId: 'org-acme', orgSlug: 'acme', pluginPrefix: 'acme' },
+    })).toEqual({ kind: 'commit', namespace: 'acme', basis: 'forge-current-org' });
   });
 
   it('commits unmatched manual installs only after a completed market sync', () => {
@@ -213,14 +165,10 @@ describe('classifyNamespaceMigration', () => {
     expect(unavailable).toBeUndefined();
     expect(ambiguous).toBeUndefined();
     expect(readNamespaceMigrationMarketRecord(() => [])).toBeNull();
-    expect(classify({ ghostId: 'xd-feishu', marketSyncCompleted: true, marketRecord: unavailable })).toEqual({
-      kind: 'pending',
-      reason: 'awaiting-market-facts',
-    });
-    expect(classify({ ghostId: 'xd-feishu', marketSyncCompleted: true, marketRecord: ambiguous })).toEqual({
-      kind: 'pending',
-      reason: 'awaiting-market-facts',
-    });
+    for (const marketRecord of [unavailable, ambiguous]) {
+      expect(classify({ ghostId: 'xd-feishu', marketSyncCompleted: true, marketRecord }))
+        .toEqual({ kind: 'pending', reason: 'awaiting-market-facts' });
+    }
     expect(classify({
       ghostId: 'xd-feishu',
       marketSyncCompleted: true,
@@ -248,29 +196,19 @@ describe('classifyNamespaceMigration', () => {
     const unavailable = readNamespaceMigrationInstallOrigin(() => { throw new Error('locked receipt'); });
     const currentOrganization = { organizationId: 'org-acme', orgSlug: 'acme', pluginPrefix: null };
     expect(unavailable).toBeUndefined();
-    expect(classify({ ghostId: 'acme-tool', marketSyncCompleted: true, installOrigin: unavailable })).toEqual({
-      kind: 'pending',
-      reason: 'awaiting-install-origin',
-    });
-    expect(classify({ ghostId: 'acme-tool', marketSyncCompleted: true, installOrigin: unavailable, builtin: true }))
-      .toEqual({ kind: 'commit', namespace: null, basis: 'builtin' });
-    expect(classify({
-      ghostId: 'acme-tool',
-      marketSyncCompleted: true,
-      installOrigin: unavailable,
-      marketRecord: { scope: 'public', source: 'market', organizationId: null },
-    })).toEqual({ kind: 'commit', namespace: null, basis: 'market-public' });
-    expect(classify({
-      ghostId: 'acme-tool',
-      marketSyncCompleted: true,
-      installOrigin: readNamespaceMigrationInstallOrigin(() => 'agent-forge'),
-      currentOrganization,
-    })).toEqual({ kind: 'pending', reason: 'awaiting-market-facts' });
-    expect(classify({
-      ghostId: 'local-tool',
-      marketSyncCompleted: true,
-      installOrigin: readNamespaceMigrationInstallOrigin(() => 'manual'),
-    })).toEqual({ kind: 'commit', namespace: null, basis: 'manual-after-sync' });
+    const cases: [Partial<ClassifyNamespaceMigrationInput> & { ghostId: string }, ReturnType<typeof classify>][] = [
+      [{ ghostId: 'acme-tool', installOrigin: unavailable }, { kind: 'pending', reason: 'awaiting-install-origin' }],
+      [{ ghostId: 'acme-tool', installOrigin: unavailable, builtin: true }, { kind: 'commit', namespace: null, basis: 'builtin' }],
+      [{ ghostId: 'acme-tool', installOrigin: unavailable, marketRecord: { scope: 'public', source: 'market', organizationId: null } },
+        { kind: 'commit', namespace: null, basis: 'market-public' }],
+      [{ ghostId: 'acme-tool', installOrigin: readNamespaceMigrationInstallOrigin(() => 'agent-forge'), currentOrganization },
+        { kind: 'pending', reason: 'awaiting-market-facts' }],
+      [{ ghostId: 'local-tool', installOrigin: readNamespaceMigrationInstallOrigin(() => 'manual') },
+        { kind: 'commit', namespace: null, basis: 'manual-after-sync' }],
+    ];
+    for (const [input, expected] of cases) {
+      expect(classify({ marketSyncCompleted: true, ...input })).toEqual(expected);
+    }
   });
 });
 
@@ -308,46 +246,23 @@ describe('commit and install conflict', () => {
   });
 
   it('blocks a same-name org install until the pending identity is committed', () => {
-    expect(
-      resolveInstallAgainstPending({
-        ghostId: 'hello',
-        requestedNamespace: 'acme',
-        pending: true,
-        classification: { kind: 'pending', reason: 'awaiting-market-facts' },
-      }),
-    ).toMatchObject({ kind: 'wait' });
-    expect(
-      resolveInstallAgainstPending({
-        ghostId: 'hello',
-        requestedNamespace: 'acme',
-        pending: true,
-        classification: { kind: 'commit', namespace: null, basis: 'market-public' },
-      }),
-    ).toMatchObject({ kind: 'wait' });
-    expect(
-      resolveInstallAgainstPending({
-        ghostId: 'hello',
-        requestedNamespace: 'acme',
-        pending: true,
-        classification: { kind: 'commit', namespace: 'acme', basis: 'market-organization' },
-      }),
-    ).toEqual({ kind: 'already-installed' });
-    expect(
-      resolveInstallAgainstPending({
-        ghostId: 'hello',
-        requestedNamespace: null,
-        pending: true,
-        classification: null,
-      }),
-    ).toEqual({ kind: 'already-installed' });
-    expect(
-      resolveInstallAgainstPending({
-        ghostId: 'hello',
-        requestedNamespace: 'acme',
-        pending: false,
-        classification: null,
-      }),
-    ).toEqual({ kind: 'proceed' });
+    type Input = Parameters<typeof resolveInstallAgainstPending>[0];
+    const waiting: Input['classification'][] = [
+      { kind: 'pending', reason: 'awaiting-market-facts' },
+      { kind: 'commit', namespace: null, basis: 'market-public' },
+    ];
+    for (const classification of waiting) {
+      expect(resolveInstallAgainstPending({ ghostId: 'hello', requestedNamespace: 'acme', pending: true, classification }))
+        .toMatchObject({ kind: 'wait' });
+    }
+    const cases: [Omit<Input, 'ghostId'>, ReturnType<typeof resolveInstallAgainstPending>][] = [
+      [{ requestedNamespace: 'acme', pending: true, classification: { kind: 'commit', namespace: 'acme', basis: 'market-organization' } }, { kind: 'already-installed' }],
+      [{ requestedNamespace: null, pending: true, classification: null }, { kind: 'already-installed' }],
+      [{ requestedNamespace: 'acme', pending: false, classification: null }, { kind: 'proceed' }],
+    ];
+    for (const [input, expected] of cases) {
+      expect(resolveInstallAgainstPending({ ghostId: 'hello', ...input })).toEqual(expected);
+    }
   });
 });
 
@@ -375,44 +290,18 @@ describe('namespace migration store', () => {
 });
 
 describe('planNamespaceCommit', () => {
-  const requested = { namespace: null as string | null, basis: 'builtin' as const };
-
-  it('recovers a receipt that already has namespace even when the plugin is busy', () => {
-    expect(
-      planNamespaceCommit({
-        pending: true,
-        busy: true,
-        receiptNamespace: 'xd',
-        requested,
-      }),
-    ).toEqual({
-      kind: 'write-ledger-only',
-      namespace: 'xd',
-      basis: 'receipt-recovered',
-    });
-  });
-
-  it('blocks the first receipt write while the plugin is busy', () => {
-    expect(
-      planNamespaceCommit({
-        pending: true,
-        busy: true,
-        requested: { namespace: 'acme', basis: 'market-organization' },
-      }),
-    ).toEqual({ kind: 'skip', reason: 'busy' });
-  });
-
-  it('applies the requested namespace when the receipt is still legacy', () => {
-    expect(
-      planNamespaceCommit({
-        pending: true,
-        busy: false,
-        requested: { namespace: 'acme', basis: 'market-organization' },
-      }),
-    ).toEqual({
-      kind: 'write-receipt-and-ledger',
-      namespace: 'acme',
-      basis: 'market-organization',
-    });
+  const cases: [string, Parameters<typeof planNamespaceCommit>[0], ReturnType<typeof planNamespaceCommit>][] = [
+    ['recovers a receipt that already has namespace even when the plugin is busy',
+      { pending: true, busy: true, receiptNamespace: 'xd', requested: { namespace: null, basis: 'builtin' } },
+      { kind: 'write-ledger-only', namespace: 'xd', basis: 'receipt-recovered' }],
+    ['blocks the first receipt write while the plugin is busy',
+      { pending: true, busy: true, requested: { namespace: 'acme', basis: 'market-organization' } },
+      { kind: 'skip', reason: 'busy' }],
+    ['applies the requested namespace when the receipt is still legacy',
+      { pending: true, busy: false, requested: { namespace: 'acme', basis: 'market-organization' } },
+      { kind: 'write-receipt-and-ledger', namespace: 'acme', basis: 'market-organization' }],
+  ];
+  it.each(cases)('%s', (_name, input, expected) => {
+    expect(planNamespaceCommit(input)).toEqual(expected);
   });
 });

@@ -15,6 +15,8 @@ import {
   findInstalledGhostByInstanceId,
   formatInstalledGhostAmbiguity,
   installedGhostStoragePart,
+  installedGhostLogicalIdentity,
+  deliveryNamespaceFields,
   resolveInstalledGhost,
 } from '../../shared/pluginIdentity.js';
 import { t } from '../i18n.js';
@@ -70,7 +72,14 @@ export function classifyGhostVisibility(
       })),
     };
   }
-  const ghost = resolved.ghost;
+  return classifyGhostAvailability(resolved.ghost, workdir, deps);
+}
+
+function classifyGhostAvailability(
+  ghost: InstalledGhost,
+  workdir: string | null,
+  deps: GhostVisibilityDeps,
+): GhostVisibilityResult {
   const instanceId = installedGhostStoragePart(ghost);
   if (!deps.isAvailableForActiveSession(instanceId)) {
     return {
@@ -96,4 +105,22 @@ export function classifyGhostVisibility(
     };
   }
   return { ok: true, ghost };
+}
+
+export function classifyInstalledGhostVisibility(
+  target: InstalledGhost,
+  workdir: string | null,
+  deps: GhostVisibilityDeps,
+): GhostVisibilityResult {
+  const identity = installedGhostLogicalIdentity(target);
+  const ghost = findInstalledGhostByInstanceId(deps.listGhosts(), installedGhostStoragePart(target));
+  if (!ghost || ghost.manifest.id !== identity.ghostId ||
+      installedGhostLogicalIdentity(ghost).namespace !== identity.namespace ||
+      ghost.dir !== target.dir ||
+      JSON.stringify(ghost.approval) !== JSON.stringify(target.approval) ||
+      JSON.stringify(deliveryNamespaceFields(ghost)) !== JSON.stringify(deliveryNamespaceFields(target)) ||
+      installedGhostStoragePart(ghost) !== installedGhostStoragePart(target)) {
+    return { ok: false, errorCode: 'GHOST_NOT_FOUND', message: t('newChat.pluginSetup.targetNotFound') };
+  }
+  return classifyGhostAvailability(ghost, workdir, deps);
 }

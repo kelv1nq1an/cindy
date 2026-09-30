@@ -337,25 +337,17 @@ function parseVisiblePluginBase(
 
 function parseVisiblePluginSummary(value: unknown, index: number): VisiblePluginSummary {
   const path = `plugins[${index}]`;
-  const parsed = parseVisiblePluginBase(value, path);
+  const { raw, ...base } = parseVisiblePluginBase(value, path);
   return {
-    id: parsed.id,
-    ghostId: parsed.ghostId,
-    name: parsed.name,
-    description: parsed.description,
-    author: parsed.author,
-    scope: parsed.scope,
-    ...parseOptionalNamespace(parsed.raw, path),
-    organizationId: parsed.organizationId,
-    defaultInstall: parsed.defaultInstall,
-    currentRelease: parseReleaseSummary(parsed.raw.currentRelease, `${path}.currentRelease`),
+    ...base,
+    currentRelease: parseReleaseSummary(raw.currentRelease, `${path}.currentRelease`),
   };
 }
 
 function parseVisiblePluginDetail(value: unknown, path: string): VisiblePluginDetail {
-  const parsed = parseVisiblePluginBase(value, path);
+  const { raw, ...parsed } = parseVisiblePluginBase(value, path);
   const currentRelease = parseReleaseDetail(
-    parsed.raw.currentRelease,
+    raw.currentRelease,
     parsed.ghostId,
     `${path}.currentRelease`,
   );
@@ -381,15 +373,7 @@ function parseVisiblePluginDetail(value: unknown, path: string): VisiblePluginDe
     throw new PluginProtocolError(`${path}.author 与 currentRelease.manifest.author 不一致`);
   }
   return {
-    id: parsed.id,
-    ghostId: parsed.ghostId,
-    name: parsed.name,
-    description: parsed.description,
-    author: parsed.author,
-    scope: parsed.scope,
-    ...parseOptionalNamespace(parsed.raw, path),
-    organizationId: parsed.organizationId,
-    defaultInstall: parsed.defaultInstall,
+    ...parsed,
     currentRelease,
   };
 }

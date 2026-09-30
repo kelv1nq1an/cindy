@@ -25,7 +25,7 @@ import {
 } from '../cindy-brain/index.js';
 import { getGhostSetupChangeBus } from '../cindy-brain/ghostSetupChangeBus.js';
 import { classifyGhostVisibility } from '../cindy-brain/ghostVisibility.js';
-import { installedGhostStoragePart } from '../../shared/pluginIdentity.js';
+import { installedGhostStoragePart, installedGhostMutationTargetToken } from '../../shared/pluginIdentity.js';
 import { isGhostDisabledForWorkdir } from '../cindy-brain/ghostWorkdirPrefs.js';
 import {
   getGrokAccessToken,
@@ -156,7 +156,7 @@ export function initializeBotAuthorizationHost(
         .from(sessions)
         .where(eq(sessions.id, sessionId))
         .limit(1);
-      const validate = async () => {
+      const validate = async (expectedTarget?: string | null) => {
         await assertSession(sessionId);
         const result = classifyGhostVisibility(target.id, session?.workingDir ?? null, {
           listGhosts: () => getGhostManager().list(),
@@ -164,9 +164,14 @@ export function initializeBotAuthorizationHost(
           isDisabledForWorkdir: isGhostDisabledForWorkdir,
         }, target.namespace);
         if (!result.ok) throw new Error('Plugin is unavailable');
+        if (expectedTarget !== undefined && (expectedTarget === null ||
+            installedGhostMutationTargetToken(result.ghost, '') !== expectedTarget)) {
+          throw new Error('Authorization plugin instance changed');
+        }
         return result.ghost;
       };
       const ghost = await validate();
+      const expectedTarget = installedGhostMutationTargetToken(ghost, '');
       const instanceId = installedGhostStoragePart(ghost);
       let reconnected = false;
       return {
@@ -176,7 +181,7 @@ export function initializeBotAuthorizationHost(
           ...(ghost.iconDataUrl ? { iconDataUrl: ghost.iconDataUrl } : {}),
         },
         async assess() {
-          await validate();
+          await validate(expectedTarget);
           const assessment = getGhostSetupAssessment(instanceId);
           if (!target.reauthorize) return assessment;
           const suggested = toReauthInteractionAssessment(assessment);
@@ -203,7 +208,7 @@ export function initializeBotAuthorizationHost(
             wake();
           }),
         async execute(action, sender, value, onAuthorizationUrl, assertCurrent, beforeCommit) {
-          await validate();
+          await validate(expectedTarget);
           assertCurrent?.();
           const release = acquireGhostMutationLeaseForMcp(captureGhostMutationOwnerForMcp());
           try {

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import type { InstalledGhost } from '../../../shared/ghost.js';
-import { classifyGhostVisibility } from '../ghostVisibility.js';
+import { classifyGhostVisibility, classifyInstalledGhostVisibility } from '../ghostVisibility.js';
 
 function ghost(id: string, namespace?: string | null, enabled = true): InstalledGhost {
   return {
@@ -69,4 +69,19 @@ describe('classifyGhostVisibility namespace', () => {
       ghost: { dir: '/tmp/_ns/acme/helper' },
     });
   });
+
+  it.each(['pending', 'root', 'in-place', 'canonical', 'coexist'] as const)(
+    'revalidates the selected physical instance in %s without erasing delivery state', (stage) => {
+      const selected = stage === 'pending'
+        ? { ...ghost('helper'), namespaceMigration: 'pending' as const }
+        : stage === 'root' ? root
+        : stage === 'in-place' ? { ...enterprise, dir: root.dir } : enterprise;
+      const others = stage === 'coexist' ? [root] : [];
+      const stageDeps = { ...deps, listGhosts: () => [selected, ...others] };
+      expect(classifyInstalledGhostVisibility(selected, null, stageDeps)).toMatchObject({ ok: true, ghost: selected });
+      const replacement = { ...selected, namespace: selected.namespace === null ? 'acme' : null };
+      expect(classifyInstalledGhostVisibility(selected, null, { ...stageDeps, listGhosts: () => [replacement] }))
+        .toMatchObject({ ok: false, errorCode: 'GHOST_NOT_FOUND' });
+    },
+  );
 });

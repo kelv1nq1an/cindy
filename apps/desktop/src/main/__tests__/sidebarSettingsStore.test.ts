@@ -200,7 +200,78 @@ describe('sidebarSettingsStore', () => {
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     fs.rmSync(harness.root, { recursive: true, force: true });
+  });
+
+  it('relocates exact hidden main-view IDs, preserves other fields and broadcasts the owner stamp', async () => {
+    const { relocateHiddenMainViewGhostId } = await import('../sidebarSettingsStore');
+    const original = {
+      pinnedOrder: ['session:one'],
+      hiddenProjectKeys: ['local:/project'],
+      hiddenMainViewGhostIds: ['helper', 'helper-more'],
+      future: { keep: true },
+    };
+    fs.mkdirSync(path.dirname(ownerFile()), { recursive: true });
+    fs.writeFileSync(ownerFile(), JSON.stringify(original));
+    await relocateHiddenMainViewGhostId('helper', '_ns__acme__helper');
+    const expected = { ...original, hiddenMainViewGhostIds: ['_ns__acme__helper', 'helper-more'] };
+    expect(JSON.parse(fs.readFileSync(ownerFile(), 'utf8'))).toEqual(expected);
+    expect(harness.send).toHaveBeenLastCalledWith(
+      'sidebar-settings:hidden-main-view-ghost-ids-changed', expected.hiddenMainViewGhostIds, request({}),
+    );
+    expect(harness.sendSecond).toHaveBeenLastCalledWith(
+      'sidebar-settings:hidden-main-view-ghost-ids-changed', expected.hiddenMainViewGhostIds, request({}),
+    );
+    expect(harness.untrustedSend).not.toHaveBeenCalled();
+    expect(harness.destroyedSend).not.toHaveBeenCalled();
+    const broadcasts = harness.send.mock.calls.length;
+    await relocateHiddenMainViewGhostId('helper', '_ns__acme__helper');
+    expect(harness.send).toHaveBeenCalledTimes(broadcasts);
+    await relocateHiddenMainViewGhostId('_ns__acme__helper', 'helper');
+    await relocateHiddenMainViewGhostId('_ns__acme__helper', 'helper');
+    expect(JSON.parse(fs.readFileSync(ownerFile(), 'utf8'))).toEqual(original);
+  });
+
+  it('refuses hidden-view destination collisions without changing disk or broadcasting', async () => {
+    const { relocateHiddenMainViewGhostId } = await import('../sidebarSettingsStore');
+    await mainViewHiddenHandler(request({ ghostId: 'helper', hidden: true }));
+    await mainViewHiddenHandler(request({ ghostId: '_ns__acme__helper', hidden: true }));
+    harness.send.mockClear();
+    harness.sendSecond.mockClear();
+    const original = fs.readFileSync(ownerFile(), 'utf8');
+    await expect(relocateHiddenMainViewGhostId('helper', '_ns__acme__helper')).rejects.toThrow(/collision/);
+    expect(fs.readFileSync(ownerFile(), 'utf8')).toBe(original);
+    expect(harness.send).not.toHaveBeenCalled();
+    expect(harness.sendSecond).not.toHaveBeenCalled();
+  });
+
+  it('refuses unreadable hidden-view settings without replacing the file', async () => {
+    const { relocateHiddenMainViewGhostId } = await import('../sidebarSettingsStore');
+    fs.mkdirSync(path.dirname(ownerFile()), { recursive: true });
+    fs.writeFileSync(ownerFile(), '{invalid');
+    await expect(relocateHiddenMainViewGhostId('helper', '_ns__acme__helper')).rejects.toBeDefined();
+    expect(fs.readFileSync(ownerFile(), 'utf8')).toBe('{invalid');
+    expect(harness.send).not.toHaveBeenCalled();
+  });
+
+  it('does not relocate hidden-view references for a different account', async () => {
+    const { relocateHiddenMainViewGhostId } = await import('../sidebarSettingsStore');
+    await mainViewHiddenHandler(request({ ghostId: 'helper', hidden: true }));
+    const original = fs.readFileSync(ownerFile('owner-a'), 'utf8');
+    setSession('cloud', 'owner-b');
+    await relocateHiddenMainViewGhostId('helper', '_ns__acme__helper');
+    expect(fs.readFileSync(ownerFile('owner-a'), 'utf8')).toBe(original);
+    expect(loadSnapshot().hiddenMainViewGhostIds).toEqual([]);
+  });
+
+  it('rejects an owner boundary without touching hidden-view state', async () => {
+    const { relocateHiddenMainViewGhostId } = await import('../sidebarSettingsStore');
+    await mainViewHiddenHandler(request({ ghostId: 'helper', hidden: true }));
+    const original = fs.readFileSync(ownerFile(), 'utf8');
+    harness.boundaryPending = true;
+    await expect(relocateHiddenMainViewGhostId('helper', '_ns__acme__helper')).rejects.toMatchObject({ code: 'PRECONDITION_FAILED' });
+    expect(fs.readFileSync(ownerFile(), 'utf8')).toBe(original);
   });
 
   it('restores a local project through the host entry with platform identity and owner fencing', async () => {

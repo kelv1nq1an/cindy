@@ -13,6 +13,7 @@
  */
 
 import Store from 'electron-store';
+import { assertGhostPrefsWritable, relocateGhostPreferenceMaps } from './ghostPreferenceRelocation.js';
 
 import { GHOST_BADGE_SUMMARY_MAX_CHARS } from '../../shared/ghost.js';
 import { isGhostInstanceId } from '../../shared/pluginIdentity.js';
@@ -36,6 +37,13 @@ const MAX_UNREAD_ENTRIES = 200;
 
 let storeInstance: Store<GhostUnreadShape> | null = null;
 let storePath: string | null = null;
+
+export async function relocateGhostUnread(from: string, to: string): Promise<void> {
+  await relocateGhostPreferenceMaps('ghost-unread.json', ['entries'], from, to, () => {
+    storeInstance = null;
+    storePath = null;
+  });
+}
 
 function getStore(): Store<GhostUnreadShape> {
   const currentPath = ownerScopedUserDataPath();
@@ -115,6 +123,7 @@ export function markGhostUnread(
   summary: string | undefined,
   at: number,
 ): { entries: GhostUnreadEntry[]; evicted: string[] } {
+  assertGhostPrefsWritable('ghost-unread.json');
   const result = applyGhostUnreadMark(loadGhostUnread(), {
     ghostId,
     ...(summary ? { summary } : {}),
@@ -154,6 +163,7 @@ export function applyGhostUnreadMark(
  * "看见了哪一条"可言。
  */
 export function clearGhostUnread(ghostId: string, seenAt?: number): GhostUnreadEntry[] | null {
+  assertGhostPrefsWritable('ghost-unread.json');
   const current = loadGhostUnread();
   const entry = current.find((candidate) => candidate.ghostId === ghostId);
   if (!entry) return null;

@@ -150,13 +150,16 @@ describe('market Ghost session boundary', () => {
     expect(source).toContain(
       'const resolved = resolveInstalledGhost(availableGhosts(), id, namespace);',
     );
-    expect(source).toContain(
-      "function findGhostByStoragePart(storagePart: string): InstalledGhost | null {",
-    );
+    const resolverStart = source.indexOf('export function findGhostForInstanceId(');
+    const resolverBody = source.slice(resolverStart, source.indexOf('\n}', resolverStart));
+    expect(resolverBody.match(/availableGhosts\(\)/g)).toHaveLength(1);
+    expect(resolverBody).toContain('findInstalledGhostByInstanceId(ghosts, id)');
+    expect(resolverBody).toContain('resolveInstalledGhost(ghosts, id, namespace)');
     expect(source.match(/getGhost: findAvailableGhost/g)?.length ?? 0).toBe(0);
     expect(source.match(/getGhost: findGhostForInstanceId/g)?.length ?? 0).toBeGreaterThanOrEqual(12);
-    expect(source).toContain(
-      'if (namespace !== undefined) return findAvailableGhost(id, namespace);',
+    expect(resolverBody).toContain('if (namespace === undefined) {');
+    expect(resolverBody).toContain(
+      "return resolved.status === 'unique' ? resolved.ghost : null;",
     );
     expect(source).toContain('availableByInstanceId.get(entry.ghostId)');
     expect(source).toContain('hasCardSlot: (ghostId) => {');
@@ -181,6 +184,15 @@ describe('market Ghost session boundary', () => {
     expect(source).toContain('return findGhostForInstanceId(id)?.manifest.name ?? null;');
   });
 
+  it('blocks relocation and source archival while a private filesystem request is in flight', () => {
+    const start = source.indexOf('function assertGhostRelocationIdle(part: string): void {');
+    const guard = source.slice(start, source.indexOf('\n}', start));
+    expect(guard).toContain('fsSlotSingleton?.hasInFlightRequests(part)');
+    expect(source).toContain('assertGhostRelocationIdle(fromPart);');
+    expect(source).toContain('if (sourceChanged) assertGhostRelocationIdle(installedGhostStoragePart(previousGhost));');
+    expect(source).toContain('if (expected.sourceChanged) assertGhostRelocationIdle(installedGhostStoragePart(installed));');
+  });
+
   it('allows explicit local replacement and detaches market routing before landing', () => {
     const updateStart = source.indexOf(
       "ipcMain.handle('ghosts:update'",
@@ -198,7 +210,7 @@ describe('market Ghost session boundary', () => {
     const helperBody = source.slice(helperStart, helperEnd);
 
     const ledgerReadIndex = helperBody.indexOf(
-      'marketLedger.installationForGhost(inspected.manifest.id)',
+      '= readLocalGhostUpdateSource(',
     );
     const captureIndex = updateBody.indexOf('const mutationOwner = captureGhostMutationOwner();');
     const inspectIndex = updateBody.indexOf('await manager.inspect(lizFilePath)');
@@ -228,7 +240,8 @@ describe('market Ghost session boundary', () => {
     expect(helperCallIndex).toBeGreaterThan(leaseIndex);
     expect(ledgerBindIndex).toBeGreaterThan(-1);
     expect(runtimeStopIndex).toBeGreaterThan(ledgerBindIndex);
-    expect(ledgerReadIndex).toBeGreaterThan(stopAndWaitIndex);
+    expect(ledgerReadIndex).toBeGreaterThan(ledgerBindIndex);
+    expect(ledgerReadIndex).toBeLessThan(runtimeStopIndex);
     expect(detachDecisionIndex).toBeGreaterThan(ledgerReadIndex);
     expect(stopAndWaitIndex).toBeGreaterThan(runtimeStopIndex);
     // 只有确认旧进程退出，才切断旧市场的自动更新路由；等待失败时保留原路由，
@@ -322,7 +335,12 @@ describe('market Ghost session boundary', () => {
     // stopAndWait (rollback if provenance check fails).
     expect(restoreIndex).toBeGreaterThan(waitIndex);
     expect(updateBody).toContain('finally {\n      releaseMutation();');
-    expect(helperBody).toContain("throwIpcError('INTERNAL', 'Unable to verify the installed Plugin source');");
+    const provenanceStart = source.indexOf('function readLocalGhostUpdateSource(');
+    const provenanceBody = source.slice(provenanceStart, helperStart);
+    expect(provenanceBody).toContain("throwIpcError('INTERNAL', 'Unable to verify the installed Plugin source');");
+    expect(provenanceBody).toContain('installationForPlugin({');
+    expect(provenanceBody).toContain('...deliveryNamespaceFields(previousGhost)');
+    expect(helperBody.indexOf('= readLocalGhostUpdateSource(')).toBeLessThan(waitIndex);
     expect(helperBody).toContain("throwIpcError('INTERNAL', 'Unable to detach the installed Plugin source');");
   });
 

@@ -106,6 +106,30 @@ async function flush() {
 beforeEach(() => vi.useFakeTimers());
 afterEach(() => vi.useRealTimers());
 describe('Bot authorization transcript lifecycle (Grok parity)', () => {
+  it('does not merge concurrent OAuth flows for omitted, root and organization namespace', async () => {
+    const h = harness();
+    let release!: () => void;
+    const pending = new Promise<void>((resolve) => { release = resolve; });
+    h.adapter.execute = vi.fn(async () => { await pending; return { ok: true as const, waitingExternal: true }; });
+    try {
+      for (const fields of [{}, { namespace: null }, { namespace: 'acme' }]) {
+        await h.service.request('s', { kind: 'plugin', id: 'p', ...fields });
+      }
+      expect(h.stored.size).toBe(3);
+      for (const card of h.stored.values()) {
+        await h.service.resolve(card.snapshot.requestId, {
+          kind: 'plugin_setup', action: 'run_action', actionId: 'connect', expectedRevision: card.snapshot.revision,
+        }, h.sender);
+      }
+      await flush();
+      expect(h.adapter.execute).toHaveBeenCalledTimes(3);
+      release();
+      await flush();
+    } finally {
+      release();
+      await h.service.dispose();
+    }
+  });
   it('dedicates the bridge to current plugin OAuth cards, without a fake Renderer sender', async () => {
     const h = harness();
     const context: RemoteOauthContext = { scope: 'tx', assertCurrent: vi.fn(), authorize: vi.fn(), finish: vi.fn() };
@@ -165,6 +189,17 @@ describe('Bot authorization transcript lifecycle (Grok parity)', () => {
     expect(h.deps.resume).toHaveBeenCalledTimes(1);
     expect(h.card().snapshot.terminal).toBe(true);
     await h.service.dispose();
+  });
+  it('does not merge concurrent legacy, root and organization authorization requests', async () => {
+    const h = harness();
+    try {
+      const requests = [undefined, null, 'acme'].map((namespace) =>
+        h.service.request('s', { kind: 'plugin', id: 'p', ...(namespace === undefined ? {} : { namespace }) }),
+      );
+      await Promise.all(requests);
+      expect(new Set(requests).size).toBe(3);
+      expect(h.stored.size).toBe(3);
+    } finally { await h.service.dispose(); }
   });
   it('watch timeout retains the card and late completion still resumes through the fallback listener', async () => {
     const h = harness();

@@ -11,6 +11,7 @@ import {
   type SplitNode,
 } from '../../../shared/layoutTree';
 import { LAYOUT_FILE_NAME, LayoutStore } from '../LayoutStore';
+import * as locks from '../../device-link/crossProcessLock.js';
 
 /** 每个用例独立临时目录(规则 23:测试路径一律 os.tmpdir,收尾清理)。 */
 let tmpDir: string;
@@ -34,7 +35,190 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
   fs.rmSync(tmpDir, { recursive: true, force: true });
+});
+
+describe('LayoutStore ghost relocation', () => {
+  it('does not create a layout file or broadcast when there is no saved layout', async () => {
+    const onChanged = vi.fn();
+    const store = makeStore(onChanged);
+    await store.relocateGhostPanels('helper', '_ns__acme__helper');
+    await store.relocateGhostPanels('helper', '_ns__acme__helper');
+    expect(fs.existsSync(filePath)).toBe(false);
+    expect(onChanged).not.toHaveBeenCalled();
+  });
+
+  function withGhost(panelKind = 'ghost:helper'): Layout {
+    return insertRootSplitPane(
+      createDefaultLayout(),
+      { id: 'plugin-pane', panelKind, minWidth: 260 },
+      { index: 2, fraction: 0.3 },
+    ).layout;
+  }
+
+  it.each(['set', 'reset'])('blocks ordinary %s until relocation and lock release finish', async (operation) => {
+    const onChanged = vi.fn();
+    const store = makeStore(onChanged);
+    const original = withGhost();
+    store.setLayout(original);
+    onChanged.mockClear();
+    const withLock = locks.withCrossProcessLock;
+    vi.spyOn(locks, 'withCrossProcessLock').mockImplementationOnce(async (file, options, task, signal) =>
+      withLock(file, options, async (status) => {
+        const result = await task(status);
+        const committedBytes = fs.readFileSync(filePath, 'utf8');
+        if (operation === 'set') {
+          expect(store.setLayout(original)).toEqual({ rejection: 'layout is relocating' });
+        } else {
+          expect(() => store.reset()).toThrow('layout is relocating');
+        }
+        expect(fs.readFileSync(filePath, 'utf8')).toBe(committedBytes);
+        expect(store.getLayout()).toEqual(original);
+        expect(onChanged).not.toHaveBeenCalled();
+        return result;
+      }, signal),
+    );
+    await store.relocateGhostPanels('helper', '_ns__acme__helper');
+    expect(store.getLayout()).toEqual(readFileJson());
+    expect(onChanged).toHaveBeenCalledTimes(1);
+    expect(store.setLayout(store.getLayout())).toMatchObject({ persisted: true });
+    expect(store.reset().persisted).toBe(true);
+    expect(store.getLayout()).toEqual(readFileJson());
+    expect(makeStore().getLayout()).toEqual(store.getLayout());
+  });
+
+  it('rejects overlapping relocation without reopening ordinary writes', async () => {
+    const store = makeStore();
+    const original = withGhost();
+    store.setLayout(original);
+    let releaseLock = (): void => {};
+    const waiting = new Promise<void>((resolve) => { releaseLock = resolve; });
+    vi.spyOn(locks, 'withCrossProcessLock').mockImplementationOnce(async (_file, _options, task) => {
+      await waiting;
+      return task({ held: true });
+    });
+    const relocation = store.relocateGhostPanels('helper', '_ns__acme__helper');
+    try {
+      await expect(store.relocateGhostPanels('helper', '_ns__other__helper')).rejects.toThrow('layout is relocating');
+      expect(store.setLayout(original)).toEqual({ rejection: 'layout is relocating' });
+      expect(() => store.reset()).toThrow('layout is relocating');
+      expect(readFileJson()).toEqual(original);
+    } finally {
+      releaseLock();
+      await relocation;
+    }
+    expect(store.getLayout()).toEqual(readFileJson());
+    expect(store.setLayout(store.getLayout())).toMatchObject({ persisted: true });
+  });
+
+  it('does not let read self-healing overwrite a pending migration and unlocks after failure', async () => {
+    const store = makeStore();
+    const raw = '{invalid';
+    fs.writeFileSync(filePath, raw);
+    vi.spyOn(locks, 'withCrossProcessLock').mockImplementationOnce(async (_file, _options, task) => {
+      expect(store.getLayout()).toEqual(createDefaultLayout());
+      store.ensurePersisted();
+      expect(fs.readFileSync(filePath, 'utf8')).toBe(raw);
+      return task({ held: true });
+    });
+    await expect(store.relocateGhostPanels('helper', '_ns__acme__helper')).rejects.toThrow(/unreadable/);
+    expect(fs.readFileSync(filePath, 'utf8')).toBe(raw);
+    expect(store.reset().persisted).toBe(true);
+    expect(readFileJson()).toEqual(createDefaultLayout());
+  });
+
+  it('preserves pane IDs, tree, and unknown fields while replaying and reversing exact kinds', async () => {
+    const onChanged = vi.fn();
+    const store = makeStore(onChanged);
+    const original = { ...withGhost(), future: { preserved: true } };
+    store.setLayout(original);
+    onChanged.mockClear();
+    await store.relocateGhostPanels('helper', '_ns__acme__helper');
+    const expected = structuredClone(original);
+    const children = (expected.content as SplitNode).children;
+    const pane = children.find((child) => child.node.id === 'plugin-pane')!.node;
+    if (pane.type === 'pane') pane.panelKind = 'ghost:_ns__acme__helper';
+    expect(readFileJson()).toEqual(expected);
+    expect(store.getLayout()).toEqual(expected);
+    expect(onChanged).toHaveBeenCalledExactlyOnceWith(expected);
+    await store.relocateGhostPanels('helper', '_ns__acme__helper');
+    expect(onChanged).toHaveBeenCalledTimes(1);
+    await store.relocateGhostPanels('_ns__acme__helper', 'helper');
+    await store.relocateGhostPanels('_ns__acme__helper', 'helper');
+    expect(readFileJson()).toEqual(original);
+    expect(onChanged).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not change a similarly named plugin', async () => {
+    const store = makeStore();
+    const original = withGhost('ghost:helper-more');
+    store.setLayout(original);
+    await store.relocateGhostPanels('helper', '_ns__acme__helper');
+    expect(readFileJson()).toEqual(original);
+  });
+
+  it('fails closed on destination collision without changing disk, cache or broadcasting', async () => {
+    const onChanged = vi.fn();
+    const store = makeStore(onChanged);
+    const original = insertRootSplitPane(
+      withGhost(),
+      { id: 'destination-pane', panelKind: 'ghost:_ns__acme__helper' },
+      { index: 1, fraction: 0.2 },
+    ).layout;
+    store.setLayout(original);
+    onChanged.mockClear();
+    await expect(store.relocateGhostPanels('helper', '_ns__acme__helper')).rejects.toThrow(/collision/);
+    expect(readFileJson()).toEqual(original);
+    expect(store.getLayout()).toEqual(original);
+    expect(onChanged).not.toHaveBeenCalled();
+  });
+
+  it.each(['{invalid', '{}', JSON.stringify({ schemaVersion: 1 })])('does not self-heal unreadable layout during migration: %s', async (raw) => {
+    const store = makeStore();
+    fs.writeFileSync(filePath, raw);
+    await expect(store.relocateGhostPanels('helper', '_ns__acme__helper')).rejects.toThrow(/unreadable/);
+    expect(fs.readFileSync(filePath, 'utf8')).toBe(raw);
+  });
+
+  it('does not apply or broadcast a relocation that failed to persist', async () => {
+    const onChanged = vi.fn();
+    const store = makeStore(onChanged);
+    const original = withGhost();
+    store.setLayout(original);
+    onChanged.mockClear();
+    vi.spyOn(fs, 'renameSync').mockImplementationOnce(() => { throw new Error('disk unavailable'); });
+    await expect(store.relocateGhostPanels('helper', '_ns__acme__helper')).rejects.toThrow(/disk unavailable/);
+    expect(readFileJson()).toEqual(original);
+    expect(store.getLayout()).toEqual(original);
+    expect(onChanged).not.toHaveBeenCalled();
+    expect(store.setLayout(original)).toMatchObject({ persisted: true });
+    expect(store.reset().persisted).toBe(true);
+    await store.relocateGhostPanels('helper', '_ns__acme__helper');
+    expect(store.getLayout()).toEqual(readFileJson());
+    expect(makeStore().getLayout()).toEqual(store.getLayout());
+  });
+
+  it('rejects a changed owner generation while waiting for the write lock', async () => {
+    let generation = 1;
+    const onChanged = vi.fn();
+    const store = new LayoutStore({
+      getFilePath: () => filePath,
+      scopeKey: () => String(generation),
+      onChanged,
+    });
+    const original = withGhost();
+    store.setLayout(original);
+    onChanged.mockClear();
+    vi.spyOn(locks, 'withCrossProcessLock').mockImplementationOnce(async (_file, _options, task) => {
+      generation += 1;
+      return task({ held: true });
+    });
+    await expect(store.relocateGhostPanels('helper', '_ns__acme__helper')).rejects.toThrow(/scope changed/);
+    expect(readFileJson()).toEqual(original);
+    expect(store.getLayout()).toEqual(original);
+    expect(onChanged).not.toHaveBeenCalled();
+  });
 });
 
 describe('LayoutStore · 读路径(宽容 + 自愈)', () => {

@@ -20,6 +20,7 @@ import { GhostChipPanelBody, GhostPanelError } from './ghostPanelBody';
 import { ghostInstallErrorKey } from './installErrorKey';
 import { pruneGhostSettingsHeights } from './ghostSettingsHeight';
 import { useGhostRuntimeState } from './runtimeStates';
+import { readInstalledGhostsSnapshot, useInstalledGhosts } from './useInstalledGhosts';
 import { getDataOwnerGeneration } from '../contexts/dataOwnerGeneration';
 
 /**
@@ -165,8 +166,7 @@ function GhostPanel({
   );
 }
 
-/** 已注册意识面板:kind → 清单指纹(内容没变就不重注册,避免组件身份变化触发无谓重挂载)。 */
-const registeredFingerprints = new Map<string, string>();
+const registeredKinds = new Set<string>();
 
 /**
  * 把注册表与"当前已装清单"对齐:新装的注册、卸下的注销、没变的不动。
@@ -192,19 +192,25 @@ export function syncGhostPanelRegistrations(ghosts: InstalledGhost[]): void {
     if (!manifest.panel) continue; // 无面板的意识(未来纯工具卡)不进注册表
     if (manifest.panel.position === 'tab') continue; // 页签形态由插件页承载(面板收束)
     if (enabled === false) continue; // 停用 = 休眠,不注册(注销走下方 seen 差集)
-    const kind = ghostPanelKind(installedGhostStoragePart(ghost));
+    const instanceId = installedGhostStoragePart(ghost);
+    const kind = ghostPanelKind(instanceId);
     seen.add(kind);
-    const fingerprint = JSON.stringify({ manifest, namespace: ghost.namespace ?? null });
-    if (registeredFingerprints.get(kind) === fingerprint) continue;
-    registeredFingerprints.set(kind, fingerprint);
-    const Component = (props: PanelComponentProps): ReactNode => (
-      <GhostPanel {...props} ghost={ghost} />
-    );
+    if (registeredKinds.has(kind)) continue;
+    registeredKinds.add(kind);
+    const Component = (props: PanelComponentProps): ReactNode => {
+      const installed = useInstalledGhosts().find(
+        (candidate) => installedGhostStoragePart(candidate) === instanceId,
+      );
+      if (!installed?.enabled || !installed.manifest.panel || installed.manifest.panel.position === 'tab') {
+        return null;
+      }
+      return <GhostPanel {...props} ghost={installed} />;
+    };
     registerPanelKind({ kind, Component, collapseMemory: 'global' });
   }
-  for (const kind of [...registeredFingerprints.keys()]) {
+  for (const kind of registeredKinds) {
     if (seen.has(kind)) continue;
-    registeredFingerprints.delete(kind);
+    registeredKinds.delete(kind);
     unregisterPanelKind(kind);
   }
 }
@@ -222,7 +228,7 @@ export function ensureGhostPanelsRegistered(): void {
   // 视同"没装任何意识",不是错误。
   const api = window.electronAPI?.ghosts;
   if (!api) return;
-  syncGhostPanelRegistrations(api.listSync().ghosts);
+  syncGhostPanelRegistrations(readInstalledGhostsSnapshot());
 }
 
 /**
@@ -247,5 +253,5 @@ export function useGhostPanelsSync(): number {
 /** 仅测试用:允许用例重复走首帧注册路径。 */
 export function __resetGhostPanelsForTest(): void {
   initialSynced = false;
-  registeredFingerprints.clear();
+  registeredKinds.clear();
 }

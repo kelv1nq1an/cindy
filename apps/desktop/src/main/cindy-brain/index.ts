@@ -106,6 +106,12 @@ import {
   type AppSessionMode,
 } from '../appSessionState.js';
 import { getLayoutStore } from '../layout/index.js';
+import { relocateHiddenMainViewGhostId } from '../sidebarSettingsStore.js';
+import {
+  assertGhostUserDataPathsCanRelocate,
+  ghostUserDataRelocationPaths,
+  relocateGhostUserDataResources,
+} from './ghostUserDataRelocation.js';
 import {
   GhostManager,
   type GhostExclusiveMutation,
@@ -132,8 +138,8 @@ import {
   installedGhostLogicalIdentity,
   installedGhostPhysicalKeys,
   installedGhostPhysicalRelId,
-  installedGhostRuntimeId,
   installedGhostStoragePart,
+  installedGhostMutationTargetToken,
   isGhostInstanceId,
   resolvePluginLibraryStorageKey,
   parsePluginInstallRelId,
@@ -301,13 +307,13 @@ import {
 } from './cindySlot.js';
 import { GhostAgentSlot, type GhostAgentTurnRunner } from './agentSlot.js';
 import { GhostErrandSlot, type GhostErrandRunner } from './errandSlot.js';
-import { readGhostErrandConfig, writeGhostErrandConfig } from './errandPrefsStore.js';
+import { readGhostErrandConfig, writeGhostErrandConfig, relocateGhostErrandPrefs } from './errandPrefsStore.js';
 import {
   GhostNodeRuntimeBroker,
   type NodeRuntimeStartAttemptContext,
 } from './nodeRuntimeBroker.js';
 import { GhostPickSlot } from './pickSlot.js';
-import { recordGhostPickedDir } from './pickGrantsStore.js';
+import { recordGhostPickedDir, relocateGhostPickedDirs } from './pickGrantsStore.js';
 import { GhostPreviewSlot } from './previewSlot.js';
 import { GhostScheduleSlot, isMainShellWindowUrl } from './scheduleSlot.js';
 import { GhostWorkspaceSlot, type WorkspaceSessionService } from './workspaceSlot.js';
@@ -329,6 +335,7 @@ import {
   loadGhostUnread,
   markGhostUnread,
   readGhostUnread,
+  relocateGhostUnread,
   type GhostUnreadEntry,
 } from './ghostUnreadStore.js';
 import { isGhostUnreadProjectable, selectRevokedGhostUnreadIds } from './ghostUnreadProjection.js';
@@ -384,7 +391,7 @@ import { GhostFsSlot } from './fsSlot.js';
 import { GhostLibrarySlot } from './librarySlot.js';
 import { LibraryBindingStore, assertLibraryMetaOwner, relocateLibraryMetaOwner, validateLibraryCandidateLocation } from './libraryBinding.js';
 import { LibraryVault, statfsFreeBytes, DEFAULT_LIBRARY_LIMITS } from './libraryVault.js';
-import { LibraryStagingStore } from './libraryStaging.js';
+import { LibraryStagingStore, relocateLibraryStagingOwner } from './libraryStaging.js';
 import { LibrarySqlService, defaultLibraryDbWorkerPath } from './librarySqlService.js';
 import { trashGhostLibrary } from './libraryTrash.js';
 import { migrateGhostLibrary } from './libraryMigrate.js';
@@ -487,6 +494,7 @@ import {
   readGhostCindyOverrides,
   readGhostCindyInflightLimit,
   writeGhostCindyOverride,
+  relocateGhostCindyPrefs,
   type CindyCapabilityKey,
 } from './cindyPrefsStore.js';
 import { isCindyOverrideModelAllowed } from './cindyOverrideWhitelist.js';
@@ -1071,20 +1079,14 @@ function findAvailableGhost(id: string, namespace?: string | null): InstalledGho
   return resolved.status === 'unique' ? resolved.ghost : null;
 }
 
-/** Protocol/pipe/vault ids are storage parts (`helper` or `_ns__acme__helper`). */
-function findGhostByStoragePart(storagePart: string): InstalledGhost | null {
-  const identity = parsePluginStoragePart(storagePart);
-  if (!identity) return null;
-  return findInstalledGhostByIdentity(availableGhosts(), identity) ?? null;
-}
-
 export function findGhostForInstanceId(id: string, namespace?: string | null): InstalledGhost | null {
-  if (namespace !== undefined) return findAvailableGhost(id, namespace);
-  return (
-    findInstalledGhostByInstanceId(availableGhosts(), id) ??
-    findGhostByStoragePart(id) ??
-    findAvailableGhost(id)
-  );
+  const ghosts = availableGhosts();
+  if (namespace === undefined) {
+    const byInstance = findInstalledGhostByInstanceId(ghosts, id);
+    if (byInstance) return byInstance;
+  }
+  const resolved = resolveInstalledGhost(ghosts, id, namespace);
+  return resolved.status === 'unique' ? resolved.ghost : null;
 }
 
 function libraryStorageKeyFor(id: string): string | null {
@@ -1397,44 +1399,6 @@ function migrateGhostKvOnRename(fromId: string, toId: string): void {
   }
 }
 
-function relocateOwnedPath(fromPath: string, toPath: string): void {
-  const fromExists = fs.existsSync(fromPath);
-  const toExists = fs.existsSync(toPath);
-  if (!fromExists) return;
-  if (toExists) {
-    throw new Error(`relocate destination already exists: ${toPath}`);
-  }
-  fs.mkdirSync(path.dirname(toPath), { recursive: true });
-  fs.renameSync(fromPath, toPath);
-}
-
-function plannedOwnedRelocate(fromPath: string, toPath: string): { from: string; to: string } | null {
-  if (!fs.existsSync(fromPath)) return null;
-  if (fs.existsSync(toPath)) {
-    throw new Error(`relocate destination already exists: ${toPath}`);
-  }
-  return { from: fromPath, to: toPath };
-}
-
-function planGhostUserDataRelocation(fromPart: string, toPart: string): Array<{ from: string; to: string }> {
-  const kvDir = ownerScopedUserDataPath('ghost-kv');
-  return [
-    plannedOwnedRelocate(path.join(kvDir, `${fromPart}.json`), path.join(kvDir, `${toPart}.json`)),
-    plannedOwnedRelocate(
-      ownerScopedUserDataPath('ghost-fs', fromPart),
-      ownerScopedUserDataPath('ghost-fs', toPart),
-    ),
-    plannedOwnedRelocate(
-      ownerScopedUserDataPath('libraries', fromPart),
-      ownerScopedUserDataPath('libraries', toPart),
-    ),
-    plannedOwnedRelocate(
-      ownerScopedUserDataPath('library-staging', fromPart),
-      ownerScopedUserDataPath('library-staging', toPart),
-    ),
-  ].filter((move): move is { from: string; to: string } => move !== null);
-}
-
 function assertGhostRelocationDbReady(): void {
   const ownerId = getActiveAppSession().dataOwnerId;
   if (!ownerId || getCurrentDbClientUserId() !== ownerId) {
@@ -1443,17 +1407,71 @@ function assertGhostRelocationDbReady(): void {
   getDbClient();
 }
 
-async function relocateGhostUserData(fromPart: string, toPart: string): Promise<void> {
+function assertGhostRelocationIdle(part: string): void {
+  if (hasPendingGhostCalls(part) || hasRunningGhostErrand(part) ||
+      hasRunningGhostCindyWork(part) || fsSlotSingleton?.hasInFlightRequests(part)) {
+    throw new Error('Ghost relocation is waiting for active work to finish');
+  }
+}
+
+async function relocateGhostUserData(
+  fromPart: string, toPart: string, moveUiReferences: boolean,
+): Promise<void> {
   if (fromPart === toPart) return;
+  assertGhostRelocationIdle(fromPart);
+  const ownerKey = activeOwnerScopeKey();
+  const assertCurrent = (): void => {
+    if (activeOwnerScopeKey() !== ownerKey || isAppSessionBoundaryPending()) {
+      throw new Error('Ghost relocation owner changed');
+    }
+    assertGhostRelocationDbReady();
+  };
+  assertCurrent();
   getGhostOauthAccountManager().invalidateGhost(fromPart);
   getGhostOauthAccountManager().invalidateGhost(toPart);
+  getBotAuthorizationService()?.invalidatePlugin(fromPart);
+  getBotAuthorizationService()?.invalidatePlugin(toPart);
+  subscriptionGatewaySingleton?.dropGhost(fromPart);
+  subscriptionGatewaySingleton?.dropGhost(toPart);
   const slot = getGhostLibrarySlot();
   slot.setRelocating(fromPart, true);
   slot.setRelocating(toPart, true);
   try {
     await slot.disposeGhost(fromPart);
     await slot.disposeGhost(toPart);
-    await relocateGhostUserDataUnlocked(fromPart, toPart);
+    await relocateGhostUserDataResources(fromPart, toPart, {
+      userDataPath: ownerScopedUserDataPath,
+      assertCurrent,
+      secrets: (from, to) => { migrateGhostSecrets(from, to); },
+      libraryBinding: (from, to) => getGhostLibraryBindingStore().relocateBinding(from, to),
+      libraryMeta: async (from, to) => {
+        const binding = await getGhostLibraryBindingStore().getBinding(to);
+        assertCurrent();
+        const root = binding ? path.join(binding.root, to) : ownerScopedUserDataPath('libraries', to);
+        await relocateLibraryMetaOwner(root, from, to, assertCurrent);
+        assertCurrent();
+        await relocateLibraryStagingOwner(
+          ownerScopedUserDataPath('library-staging', to), from, to, ownerKey, assertCurrent,
+        );
+      },
+      workdirPreferences: relocateGhostWorkdirPrefs,
+      cindyPreferences: relocateGhostCindyPrefs,
+      errandPreferences: relocateGhostErrandPrefs,
+      pickedDirectories: relocateGhostPickedDirs,
+      media: ledger.relocateGhostMediaRefs,
+      cards: async (from, to) => {
+        await getGhostCardService().relocateGhost(from, to);
+        assertCurrent();
+        await reassignGhostCards(from, to);
+      },
+      unread: relocateGhostUnread,
+      ui: async (from, to) => {
+        await getLayoutStore().relocateGhostPanels(from, to);
+        assertCurrent();
+        await relocateHiddenMainViewGhostId(from, to);
+        assertCurrent();
+      },
+    }, moveUiReferences);
   } finally {
     try {
       await slot.disposeGhost(fromPart);
@@ -1462,68 +1480,6 @@ async function relocateGhostUserData(fromPart: string, toPart: string): Promise<
       slot.setRelocating(fromPart, false);
       slot.setRelocating(toPart, false);
     }
-  }
-}
-
-async function relocateGhostUserDataUnlocked(fromPart: string, toPart: string): Promise<void> {
-  const planned = planGhostUserDataRelocation(fromPart, toPart);
-  const moved: Array<{ from: string; to: string }> = [];
-  let rollbackSecrets: (() => void) | null = null;
-  let bindingMoved = false;
-  let rollbackWorkdir: (() => Promise<void>) | null = null;
-  let renamedLibraryMeta: string | null = null;
-  try {
-    for (const move of planned) {
-      relocateOwnedPath(move.from, move.to);
-      moved.push(move);
-    }
-    rollbackSecrets = migrateGhostSecrets(fromPart, toPart);
-    await getGhostLibraryBindingStore().relocateBinding(fromPart, toPart);
-    bindingMoved = true;
-    const customBinding = await getGhostLibraryBindingStore().getBinding(toPart);
-    const libraryRoot = customBinding
-      ? path.join(customBinding.root, toPart)
-      : ownerScopedUserDataPath('libraries', toPart);
-    if (await relocateLibraryMetaOwner(libraryRoot, fromPart, toPart)) renamedLibraryMeta = libraryRoot;
-    rollbackWorkdir = await relocateGhostWorkdirPrefs(fromPart, toPart);
-    await ledger.relocateGhostMediaRefs(fromPart, toPart);
-  } catch (error) {
-    if (renamedLibraryMeta) {
-      try {
-        await relocateLibraryMetaOwner(renamedLibraryMeta, toPart, fromPart);
-      } catch (rollbackError) {
-        void rollbackError;
-      }
-    }
-    if (rollbackWorkdir) {
-      try {
-        await rollbackWorkdir();
-      } catch (rollbackError) {
-        void rollbackError;
-      }
-    }
-    if (bindingMoved) {
-      try {
-        await getGhostLibraryBindingStore().relocateBinding(toPart, fromPart);
-      } catch {
-        /* keep failing closed on the original error */
-      }
-    }
-    if (rollbackSecrets) {
-      try {
-        rollbackSecrets();
-      } catch {
-        /* keep failing closed on the original error */
-      }
-    }
-    for (const move of moved.reverse()) {
-      try {
-        relocateOwnedPath(move.to, move.from);
-      } catch {
-        /* keep failing closed on the original error */
-      }
-    }
-    throw error;
   }
 }
 
@@ -1858,16 +1814,16 @@ export function getGhostManager(): GhostManager {
       onBeforePhysicalRelocate: async (fromRelId) => {
         const ghost = findGhostForInstanceId(fromRelId);
         if (ghost) suspendGhostProtocolForRelocation(ghost);
-        const parts = new Set<string>([fromRelId]);
-        const fromIdentity = parsePluginInstallRelId(fromRelId) ?? parsePluginStoragePart(fromRelId);
-        if (fromIdentity) parts.add(pluginStoragePart(fromIdentity));
-        if (ghost) parts.add(installedGhostStoragePart(ghost));
-        for (const part of parts) getGhostOauthAccountManager().invalidateGhost(part);
-        for (const part of parts) {
-          getGhostRuntime().stop(part);
-          await getGhostNodeRuntimeBroker().stopAndWait(part);
-          getGhostRuntime().resetFuse(part);
-        }
+        const identity = parsePluginInstallRelId(fromRelId);
+        if (!identity) throw new Error('relocate identity is invalid');
+        const part = ghost ? installedGhostStoragePart(ghost) : pluginStoragePart(identity);
+        getGhostOauthAccountManager().invalidateGhost(part);
+        getGhostRuntime().stop(part);
+        await getGhostNodeRuntimeBroker().stopAndWait(part);
+        getGhostRuntime().resetFuse(part);
+        assertGhostRelocationIdle(part);
+        getGhostAgentSlot().clearGhost(part);
+        getGhostErrandSlot().clearGhost(part);
       },
       onValidatePhysicalRelocation: async (fromRelId, toRelId) => {
         assertGhostRelocationDbReady();
@@ -1876,7 +1832,10 @@ export function getGhostManager(): GhostManager {
         if (!fromIdentity || !toIdentity) throw new Error('relocate identities are invalid');
         const fromPart = pluginStoragePart(fromIdentity);
         const toPart = pluginStoragePart(toIdentity);
-        planGhostUserDataRelocation(fromPart, toPart);
+        assertGhostRelocationIdle(fromPart);
+        assertGhostUserDataPathsCanRelocate(
+          ghostUserDataRelocationPaths(fromPart, toPart, ownerScopedUserDataPath),
+        );
         assertGhostSecretsCanRelocate(fromPart, toPart);
         await getGhostLibraryBindingStore().assertCanRelocateBinding(fromPart, toPart);
       },
@@ -1912,7 +1871,7 @@ export function getGhostManager(): GhostManager {
           const fromPart = pluginStoragePart(fromIdentity);
           const toPart = pluginStoragePart(toIdentity);
           prepareGhostOptionalRelocation(fromPart, toPart);
-          await relocateGhostUserData(fromPart, toPart);
+          await relocateGhostUserData(fromPart, toPart, true);
           readyGhostOptionalRelocation(fromPart, toPart);
           retryGhostOptionalRelocations(relocateGhostOptionalHistory, logGhostOptionalRelocationError);
         } finally {
@@ -1923,7 +1882,7 @@ export function getGhostManager(): GhostManager {
         assertGhostRelocationDbReady();
         const releaseMutation = beginGhostMutation(captureGhostMutationOwner());
         try {
-          await relocateGhostUserData(fromPart, archivePart);
+          await relocateGhostUserData(fromPart, archivePart, false);
         } finally {
           releaseMutation();
         }
@@ -3065,7 +3024,7 @@ let cindySlotSingleton: GhostCindySlot | null = null;
 // redirect cleanup into the newly active account's persistent cache.
 const anonymousDownloadRoots = new Map<string, { root: string; scope: string }>();
 const pluginDownloads = new PluginDownloadSlot({
-  getGhost: findAvailableGhost, root: id => {
+  getGhost: findGhostForInstanceId, root: id => {
     const root = ownerScopedUserDataPath('plugin-downloads', id);
     if (!getActiveAppSession().dataOwnerId) anonymousDownloadRoots.set(id, { root, scope: activeOwnerScopeKey() });
     return root;
@@ -3148,7 +3107,7 @@ function isNamespaceMigrationBusy(ghostId: string): boolean {
     .list()
     .find((candidate) => installedGhostPhysicalRelId(candidate) === ghostId);
   if (!ghost) return false;
-  const runtimeId = installedGhostRuntimeId(ghost);
+  const runtimeId = installedGhostStoragePart(ghost);
   const state = runtimeSingleton?.stateOf(runtimeId);
   return state === 'starting' || state === 'running' || state === 'stopping' ||
     nodeRuntimeBrokerSingleton?.stateOf(runtimeId) === 'running';
@@ -3177,7 +3136,7 @@ async function preparePendingResidentForMigration(ghostId: string): Promise<bool
     candidate.namespaceMigration === 'pending' &&
     installedGhostPhysicalRelId(candidate) === ghostId);
   if (!ghost) return false;
-  const runtimeId = installedGhostRuntimeId(ghost);
+  const runtimeId = installedGhostStoragePart(ghost);
   getGhostRuntime().stop(runtimeId);
   await getGhostNodeRuntimeBroker().stopAndWait(runtimeId);
   if (activeOwnerScopeKey() !== ownerScopeKey || isAppSessionBoundaryPending()) {
@@ -3796,6 +3755,7 @@ export function getGhostPickSlot(): GhostPickSlot {
   if (!pickSlotSingleton) {
     pickSlotSingleton = new GhostPickSlot({
       getGhost: findGhostForInstanceId,
+      getMutationTarget: ghostInstallMutationTargetFor,
       showDirectoryDialog: async ({ ghostName, purpose }) => {
         const win = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0];
         if (!win || win.isDestroyed()) throw new Error('没有可挂靠的宿主窗口');
@@ -3834,6 +3794,7 @@ export function getGhostWorkspaceSlot(): GhostWorkspaceSlot {
   if (!workspaceSlotSingleton) {
     workspaceSlotSingleton = new GhostWorkspaceSlot({
       getGhost: findGhostForInstanceId,
+      getMutationTarget: ghostInstallMutationTargetFor,
       showDirectoryDialog: async ({ ghostName, purpose }) => {
         const win = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0];
         if (!win || win.isDestroyed()) throw new Error('没有可挂靠的宿主窗口');
@@ -5616,9 +5577,9 @@ function getGhostOauthAccountManager(): GhostOauthAccountManager {
       },
       captureConnectTarget: ghostInstallMutationTargetFor,
       isConnectTargetCurrent: (ghostId, secretKey, decl, expectedConnectTarget) => {
-        if (expectedConnectTarget !== undefined &&
-            ghostInstallMutationTargetFor(ghostId) !== expectedConnectTarget) return false;
         const ghost = findGhostForInstanceId(ghostId);
+        if (expectedConnectTarget !== undefined &&
+            (!ghost || installedGhostMutationTargetToken(ghost, activeOwnerScopeKey()) !== expectedConnectTarget)) return false;
         const currentDecl = ghost
           ? withRuntimeFiloGoogleClient(ghost.manifest).network?.secrets?.find(
               (secret) => secret.key === secretKey && secret.source === 'oauth',
@@ -5635,15 +5596,9 @@ function getGhostOauthAccountManager(): GhostOauthAccountManager {
 }
 
 function ghostInstallMutationTargetFor(ghostId: string): string | null {
+  if (isAppSessionBoundaryPending()) return null;
   const ghost = findGhostForInstanceId(ghostId);
-  if (!ghost || ghost.approval.state !== 'approved') return null;
-  return JSON.stringify([
-    activeOwnerScopeKey(),
-    ghost.dir,
-    installedGhostStoragePart(ghost),
-    ghostInstallApprovalToken(ghost.approval),
-    deliveryNamespaceFields(ghost),
-  ]);
+  return ghost ? installedGhostMutationTargetToken(ghost, activeOwnerScopeKey()) : null;
 }
 
 /**
@@ -6346,6 +6301,20 @@ export async function getGhostLibraryOverview(ghostId: string): Promise<GhostLib
   };
 }
 
+function ghostLibraryDeleteTargetFor(ghostId: string): string | null {
+  if (isAppSessionBoundaryPending()) return null;
+  const approvedTarget = ghostInstallMutationTargetFor(ghostId);
+  if (approvedTarget !== null) return approvedTarget;
+  const ghost = findGhostForInstanceId(ghostId);
+  return JSON.stringify([
+    activeOwnerScopeKey(),
+    ghost?.dir ?? null,
+    ghost?.manifest.id ?? null,
+    ghostInstallApprovalToken(ghost?.approval),
+    ghost ? deliveryNamespaceFields(ghost) : null,
+  ]);
+}
+
 /**
  * 删除 Library(设置页独立确认后的执行体;与卸载是两个操作):作废运行会话,
  * 库根 rename 进 owner 级回收站(30 天回滚窗),撤销 binding。调用方(设置页
@@ -6353,29 +6322,52 @@ export async function getGhostLibraryOverview(ghostId: string): Promise<GhostLib
  */
 export async function deleteGhostLibraryForActiveOwner(
   ghostId: string,
+  expectedTarget = ghostLibraryDeleteTargetFor(ghostId),
+): Promise<{ ok: boolean; message?: string }> {
+  return getGhostManager().runExclusiveMutation(() =>
+    deleteGhostLibraryLocked(ghostId, expectedTarget),
+  );
+}
+
+async function deleteGhostLibraryLocked(
+  ghostId: string,
+  expectedTarget: string | null,
 ): Promise<{ ok: boolean; message?: string }> {
   const storagePart = libraryStorageKeyFor(ghostId);
   if (!storagePart) return { ok: false, message: '非法插件 id' };
+  const assertCurrent = (): void => {
+    if (expectedTarget === null || ghostLibraryDeleteTargetFor(ghostId) !== expectedTarget) {
+      throw new Error('Library 对应的 Plugin 或账号已变化，请重新确认删除');
+    }
+  };
+  assertCurrent();
   const slot = getGhostLibrarySlot();
   slot.setRelocating(storagePart, true);
   try {
     await slot.disposeGhost(storagePart);
+    assertCurrent();
     const result = await trashGhostLibrary(storagePart, {
       // 默认根与自定义根都经 binding store 的解析口径(漂移时返回 null → 上层
       // 引导恢复位置,不误删)。
       resolveLibraryRoot: async (id) => {
         const resolution = await getGhostLibraryBindingStore().resolveLibraryRoot(id);
+        assertCurrent();
         const root = resolution.kind === 'custom' ? resolution.root : ownerScopedUserDataPath('libraries', id);
         if (!root) return null;
         try {
           await assertLibraryMetaOwner(root, id);
-          return root;
         } catch {
           return null;
         }
+        assertCurrent();
+        return root;
       },
-      trashRoot: () => ownerScopedUserDataPath('libraries-trash'),
+      trashRoot: () => {
+        assertCurrent();
+        return ownerScopedUserDataPath('libraries-trash');
+      },
       removeBinding: async (id) => {
+        assertCurrent();
         await getGhostLibraryBindingStore().removeBinding(id);
       },
       log,
@@ -6707,6 +6699,7 @@ async function updateLocalGhostPackageLocked(
   const { marketRecord, sourceChanged, authorizationOverrides } = readLocalGhostUpdateSource(
     manager, previousGhost, inspected, installOrigin,
   );
+  if (sourceChanged) assertGhostRelocationIdle(installedGhostStoragePart(previousGhost));
   rejectUnauthorizedTokenBroker(inspected.canonicalManifest, authorizationOverrides);
   runtime.stop(previousGhost ? installedGhostStoragePart(previousGhost) : inspected.manifest.id);
   // 等待失败表示旧进程仍可能存活；此时不能恢复 resident，否则会产生
@@ -7133,6 +7126,7 @@ async function installOrUpdateMarketGhostPackageLocked(
     }
 
     expected.beforeCommitInLock?.();
+    if (expected.sourceChanged) assertGhostRelocationIdle(installedGhostStoragePart(installed));
     const runtime = getGhostRuntime();
     runtime.stop(installedGhostStoragePart(installed));
     // 无法确认旧进程已退出时保持停止态，不能启动第二份 resident。只有旧进程
@@ -7279,6 +7273,7 @@ async function uninstallGhostAndCleanupLocked(
       ? installedGhostPhysicalKeys(ghost)
       : { relId: pluginInstallRelId(identity), storagePart: pluginStoragePart(identity) };
     const ghostId = identity.ghostId;
+    getBotAuthorizationService()?.invalidatePlugin(storagePart);
     const completeLedger =
       options?.skipMarketLedger === true
         ? null
@@ -8582,12 +8577,15 @@ export function registerGhostIpc(): void {
           'model must be null or an allowed model of the capability category',
         );
       }
+      const ghost = findGhostForInstanceId(ghostId);
+      if (!ghost) throwIpcError('NOT_FOUND', '插件实例已变化，请刷新后重试');
+      const storedId = installedGhostStoragePart(ghost);
       const overrides = writeGhostCindyOverride(
-        ghostId,
+        storedId,
         capability as CindyCapabilityKey,
         model as string | null,
       );
-      getGhostSetupChangeBus().emit(ghostId, {
+      getGhostSetupChangeBus().emit(storedId, {
         source: 'host_config',
         ref: `cindy-pref:${String(capability)}`,
       });
@@ -8613,7 +8611,11 @@ export function registerGhostIpc(): void {
     if (config !== null && (typeof config !== 'object' || Array.isArray(config))) {
       throwIpcError('INVALID_PARAMS', 'config must be an object or null');
     }
-    const saved = writeGhostErrandConfig(ghostId, config as Record<string, unknown> | null);
+    const ghost = findGhostForInstanceId(ghostId);
+    if (!ghost) throwIpcError('NOT_FOUND', '插件实例已变化，请刷新后重试');
+    const saved = writeGhostErrandConfig(
+      installedGhostStoragePart(ghost), config as Record<string, unknown> | null,
+    );
     return { config: saved };
   });
 
@@ -9157,6 +9159,8 @@ export function registerGhostIpc(): void {
   ipcMain.handle('ghosts:library-delete', async (event, id: unknown) => {
     assertTrustedAppRendererEvent(event);
     if (typeof id !== 'string' || !isGhostInstanceId(id)) throwIpcError('INVALID_PARAMS', '非法插件 id');
+    const expectedOwner = captureGhostMutationOwner();
+    const expectedTarget = ghostLibraryDeleteTargetFor(id);
     // **唯一有效的删除确认在 Main**:preload 即使被其它 trusted renderer
     // 调用也绕不过用户点击(review:Renderer 确认可被内部调用方绕过)。文案走
     // main i18n(与 Renderer 五语同一资源),壳由系统绘制；取消不取得 mutation
@@ -9180,9 +9184,9 @@ export function registerGhostIpc(): void {
       ? await dialog.showMessageBox(parent, options)
       : await dialog.showMessageBox(options);
     if (decision.response !== 0) return { ok: false as const, cancelled: true as const };
-    const releaseMutation = beginGhostMutation();
+    const releaseMutation = beginGhostMutation(expectedOwner);
     try {
-      const res = await deleteGhostLibraryForActiveOwner(id);
+      const res = await deleteGhostLibraryForActiveOwner(id, expectedTarget);
       return res.ok
         ? { ok: true as const }
         : { ok: false as const, cancelled: false as const, message: res.message };
@@ -9352,9 +9356,10 @@ export function handleGhostExternalLinkNavigation(
   hostContents: WebContents,
   guestContents: WebContents,
   isOwnerActive: () => boolean,
+  instanceId?: string,
 ): void {
   void runGhostExternalLinkNavigation(
-    { ghostId, url, hostContents, guestContents },
+    { ghostId: instanceId ?? ghostId, url, hostContents, guestContents },
     {
       gate: getGhostExternalLinkGate(),
       resolveOwner: (contents) => BrowserWindow.fromWebContents(contents),

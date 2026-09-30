@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { deliveryNamespaceFields } from '../../shared/pluginIdentity.js';
 import { getRemoteOauthContext, notifyOauthCardClosed } from '../plugin-oauth/context.js';
 import type { PluginOauthAction } from '@cindy/device-link';
 import type { OauthCardBinding } from '../plugin-oauth/transactions.js';
@@ -129,7 +130,7 @@ export class BotAuthorizationService {
   private requests = new Map<string, ReturnType<BotAuthorizationService['requestCard']>>();
   request(sessionId: string, target: BotAuthorizationTarget, plan?: GhostSetupPlan) {
     const key = JSON.stringify([this.epoch, sessionId, target.kind, target.id,
-      target.kind === 'plugin' ? target.namespace : undefined, !!target.reauthorize]);
+      target.kind === 'plugin' ? deliveryNamespaceFields(target) : null, !!target.reauthorize]);
     const existing = this.requests.get(key);
     if (existing) return existing;
     const pending = this.requestCard(sessionId, target, plan).finally(() =>
@@ -284,6 +285,7 @@ export class BotAuthorizationService {
         const entry = this.attach(card, adapter);
         entry.assessmentFingerprint = JSON.stringify(assessment);
         if (!(await this.isVisible(entry))) return null;
+        if (card.snapshot.ghost.id !== adapter.identity.id) await this.refresh(entry, assessment);
         // Broadcast a newer revision before accepting a stale reopen click. The
         // retained card can then start a new flow without a generic action error.
         if (hadReopenAction) await this.save(entry);
@@ -459,7 +461,7 @@ export class BotAuthorizationService {
       },
     };
     const key = JSON.stringify([entry.card.target.kind, entry.card.target.id,
-      entry.card.target.kind === 'plugin' ? entry.card.target.namespace : undefined,
+      entry.card.target.kind === 'plugin' ? deliveryNamespaceFields(entry.card.target) : null,
       action.id, getRemoteOauthContext()?.scope ?? 'local']);
     let flight = this.oauthFlights.get(key);
     if (!flight) {
@@ -639,6 +641,12 @@ export class BotAuthorizationService {
     if (entry.expiry) clearTimeout(entry.expiry);
     this.entries.delete(entry.card.snapshot.requestId);
   }
+  invalidatePlugin(instanceId: string): void {
+    for (const entry of this.entries.values()) {
+      if (entry.card.target.kind === 'plugin' && entry.adapter.identity.id === instanceId) this.close(entry);
+    }
+  }
+
   async dispose() {
     this.epoch += 1;
     this.deps.onDisposing?.();

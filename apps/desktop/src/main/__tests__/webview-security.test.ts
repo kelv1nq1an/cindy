@@ -681,8 +681,9 @@ describe('installGhostGuestNavigationHandlers(Ghost settingsHtml / panel 共用�
     guest.setWindowOpenHandler = vi.fn((handler) => {
       openHandler = handler;
     });
-    const host = { id: 10 } as unknown as WebContents;
+    const host = Object.assign(new EventEmitter(), { id: 10 }) as unknown as WebContents;
     let ownerActive = true;
+    let attachCurrent = true;
     const gesture = vi.fn();
     const preview = vi.fn();
     const external = vi.fn();
@@ -693,6 +694,7 @@ describe('installGhostGuestNavigationHandlers(Ghost settingsHtml / panel 共用�
       () => ownerActive,
       { gesture, preview, external },
       instanceId,
+      () => attachCurrent,
     );
     return {
       guest,
@@ -703,9 +705,25 @@ describe('installGhostGuestNavigationHandlers(Ghost settingsHtml / panel 共用�
       setOwnerActive: (active: boolean) => {
         ownerActive = active;
       },
+      setAttachCurrent: (current: boolean) => { attachCurrent = current; },
       getOpenHandler: () => openHandler,
     };
   }
+
+  it('does not navigate or record a gesture after its attached instance is replaced', () => {
+    const harness = makeHarness('_ns__acme__xd-sites');
+    const url = 'https://example.invalid/control';
+    harness.guest.emit('will-navigate', { preventDefault: vi.fn() }, url);
+    expect(harness.external).toHaveBeenCalledTimes(1);
+    const isCurrent = harness.external.mock.calls[0]![4] as () => boolean;
+    expect(isCurrent()).toBe(true);
+    harness.setAttachCurrent(false);
+    expect(isCurrent()).toBe(false);
+    harness.guest.emit('will-navigate', { preventDefault: vi.fn() }, url);
+    harness.guest.emit('before-input-event', {}, { type: 'mouseDown' });
+    expect(harness.external).toHaveBeenCalledTimes(1);
+    expect(harness.gesture).not.toHaveBeenCalled();
+  });
 
   it('普通 HTTPS <a> 的 will-navigate 被拦下并带真实 host/guest 交给外链处理', () => {
     const harness = makeHarness();
@@ -720,8 +738,20 @@ describe('installGhostGuestNavigationHandlers(Ghost settingsHtml / panel 共用�
       harness.host,
       harness.guest,
       expect.any(Function),
+      undefined,
     );
     expect(harness.preview).not.toHaveBeenCalled();
+  });
+
+  it('carries the attached organization instance through external navigation and gestures', () => {
+    const harness = makeHarness('_ns__acme__xd-sites');
+    harness.guest.emit('will-navigate', { preventDefault: vi.fn() }, 'https://example.com/');
+    expect(harness.external).toHaveBeenCalledWith(
+      'xd-sites', 'https://example.com/', harness.host, harness.guest,
+      expect.any(Function), '_ns__acme__xd-sites',
+    );
+    harness.guest.emit('before-mouse-event', {}, { type: 'mouseDown' });
+    expect(harness.gesture).toHaveBeenCalledWith('_ns__acme__xd-sites');
   });
 
   it('预览仍走既有处理，同 Ghost 协议普通页面仍允许原位导航', () => {

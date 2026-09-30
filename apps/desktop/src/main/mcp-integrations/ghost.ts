@@ -86,6 +86,7 @@ import {
 import {
   findInstalledGhostByInstanceId,
   installedGhostLogicalIdentity,
+  deliveryNamespaceFields,
   installedGhostStoragePart,
   pluginStoragePart,
   resolveInstalledGhost,
@@ -105,7 +106,7 @@ import {
 } from '../cindy-brain/index.js';
 import { writeForgeScaffoldWithStableParent } from '../cindy-brain/forgeScaffoldCapability.js';
 import { getGhostSetupCoordinator } from '../cindy-brain/ghostSetupCoordinator.js';
-import { classifyGhostVisibility } from '../cindy-brain/ghostVisibility.js';
+import { classifyGhostVisibility, classifyInstalledGhostVisibility } from '../cindy-brain/ghostVisibility.js';
 import { readInstalledGhostManual } from '../cindy-brain/ghostManual.js';
 import { isGhostDisabledForWorkdir } from '../cindy-brain/ghostWorkdirPrefs.js';
 import { FORGE_GUIDE, packGhostDir, scaffoldGhostDir } from '../cindy-brain/forge.js';
@@ -1981,7 +1982,7 @@ export function getCindyGhostsMcpDeps(
       const authorizationService = getBotAuthorizationService();
       if (authorizationService && authorizationSessionId && await isBotAuthorizationSession(authorizationSessionId)) {
         const service = authorizationService;
-        const card = await service.request(authorizationSessionId, { kind: 'plugin', id: instanceId, ...(setupPlan && getGhostSetupAssessment(instanceId).reauthSuggest ? { reauthorize: true } : {}) }, setupPlan);
+        const card = await service.request(authorizationSessionId, { kind: 'plugin', id: target.manifest.id, ...deliveryNamespaceFields(target), ...(setupPlan && getGhostSetupAssessment(instanceId).reauthSuggest ? { reauthorize: true } : {}) }, setupPlan);
         if (!card.ok) return card;
       }
       const setup = await setupCoordinator.ensureReady({
@@ -1995,8 +1996,8 @@ export function getCindyGhostsMcpDeps(
 
       // OAuth/settings may take minutes. Re-resolve mutable target facts after
       // the waiter completes and before beginning the existing side effects.
-      const refreshedVisibility = classifyGhostVisibility(
-        instanceId,
+      const refreshedVisibility = classifyInstalledGhostVisibility(
+        target,
         sessionWorkdir,
         ghostVisibilityDeps,
       );
@@ -2035,8 +2036,8 @@ export function getCindyGhostsMcpDeps(
       if (grantOnly) {
         // Full pre-grant gate: confirm target, workdir, and setup readiness
         // BEFORE grantAttachmentUrls creates durable ledger entries.
-        const grantVisibility = classifyGhostVisibility(
-          instanceId,
+        const grantVisibility = classifyInstalledGhostVisibility(
+          target,
           sessionWorkdir,
           ghostVisibilityDeps,
         );
@@ -2072,8 +2073,8 @@ export function getCindyGhostsMcpDeps(
         }
         // Post-grant revalidation: the grant process includes an async user
         // confirmation step; re-check everything before returning success.
-        const postGrantVisibility = classifyGhostVisibility(
-          instanceId,
+        const postGrantVisibility = classifyInstalledGhostVisibility(
+          target,
           sessionWorkdir,
           ghostVisibilityDeps,
         );
@@ -2202,8 +2203,8 @@ export function getCindyGhostsMcpDeps(
       // Pre-dispatch revalidation: attachment grants and dir tickets may have
       // taken time; confirm the target is still available before committing the
       // callId and dispatching to the sandbox.
-      const preDispatchVisibility = classifyGhostVisibility(
-        instanceId,
+      const preDispatchVisibility = classifyInstalledGhostVisibility(
+        target,
         sessionWorkdir,
         ghostVisibilityDeps,
       );
@@ -2247,8 +2248,8 @@ export function getCindyGhostsMcpDeps(
         }
       }
       // Full revalidation after session-context await (DB query may take time)
-      const postCtxVisibility = classifyGhostVisibility(
-        instanceId,
+      const postCtxVisibility = classifyInstalledGhostVisibility(
+        target,
         sessionWorkdir,
         ghostVisibilityDeps,
       );

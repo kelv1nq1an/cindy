@@ -2,6 +2,7 @@ import { app, BrowserWindow, ipcMain } from 'electron';
 import path from 'node:path';
 
 import { createLogger } from '../logger.js';
+import { activeOwnerScopeKey } from '../appSessionState.js';
 import { throwIpcError } from '../utils/ipcValidate.js';
 import type { Layout } from '../../shared/layoutTree.js';
 import { LAYOUT_FILE_NAME, LayoutStore } from './LayoutStore.js';
@@ -27,6 +28,7 @@ export function getLayoutStore(): LayoutStore {
   if (!storeSingleton) {
     storeSingleton = new LayoutStore({
       getFilePath: () => path.join(app.getPath('userData'), LAYOUT_FILE_NAME),
+      scopeKey: activeOwnerScopeKey,
       onChanged: broadcastLayoutChanged,
       log,
     });

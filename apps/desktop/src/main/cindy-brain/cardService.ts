@@ -203,6 +203,7 @@ interface CallEntry {
 /** 卡片供片服务(单例装配见 cindy-brain/index.ts)。 */
 export class GhostCardService {
   private readonly calls = new Map<string, CallEntry>();
+  private readonly pendingWrites = new Map<Promise<void>, string>();
   private lastSweepAt = 0;
 
   constructor(private readonly deps: GhostCardServiceDeps) {}
@@ -295,6 +296,17 @@ export class GhostCardService {
    * 兜底(cardStoreDb.getGhostCard)。 */
   ownerOf(callId: string): string | null {
     return this.calls.get(callId)?.ghostId ?? null;
+  }
+
+  async relocateGhost(fromPart: string, toPart: string): Promise<void> {
+    for (const entry of this.calls.values()) {
+      if (entry.ghostId === fromPart) entry.ghostId = toPart;
+    }
+    await Promise.all(
+      [...this.pendingWrites]
+        .filter(([, ghostId]) => ghostId === fromPart)
+        .map(([pending]) => pending),
+    );
   }
 
   /**
@@ -447,12 +459,13 @@ export class GhostCardService {
       updatedAt: now,
     };
     // 落库失败不阻断推送:活卡先见,历史回放缺卡由 renderer missing 降级兜底。
-    void this.deps.persist(row).catch((err) => {
+    const pending = this.deps.persist(row).catch((err) => {
       this.deps.log?.warn('ghost card persist failed', {
         callId: p.callId,
         error: err instanceof Error ? err.message : String(err),
       });
-    });
+    }).finally(() => this.pendingWrites.delete(pending));
+    this.pendingWrites.set(pending, senderGhostId);
     this.deps.broadcast({
       callId: p.callId,
       ghostId: senderGhostId,

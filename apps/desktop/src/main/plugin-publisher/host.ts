@@ -96,8 +96,9 @@ export function publisherAudience(orgSlug: string | null): string {
   return `${orgSlug}:${PLUGIN_MEMBER_PUBLISHER_GHOST_ID}`;
 }
 
-function createApi(): PluginPublisherApi {
+export function createPluginPublisherApi(): PluginPublisherApi {
   return new PluginPublisherApi({
+    getClientVersion: () => app.getVersion(),
     async getToken() {
       const identity = await resolvePublisherIdentity();
       if (!identity?.orgSlug) throw new Error('无法确认发布组织身份，请刷新登录后重试');
@@ -132,7 +133,7 @@ export function trackPublisherConfirmRequester(contents: WebContents): void {
 export function getPluginPublisherOrchestrator(): PluginPublisherOrchestrator {
   if (!orchestratorSingleton) {
     orchestratorSingleton = createPluginPublisherOrchestrator({
-      api: createApi(),
+      api: createPluginPublisherApi(),
       identity: resolvePublisherIdentity,
       async inspectPackage(filePath) {
         const inspected = await getGhostManager().inspect(filePath);

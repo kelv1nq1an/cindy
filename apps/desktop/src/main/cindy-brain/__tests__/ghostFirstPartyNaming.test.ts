@@ -39,11 +39,9 @@ afterEach(() => {
 describe('first-party naming and approved source eligibility', () => {
   it.each(['xd-helper', 'filo-helper', 'cindy-helper'])('does not grant new root %s by name or builtin roster', (ghostId) => {
     for (const builtin of [false, true]) {
-      for (const marketRecord of [null]) {
-        expect(resolveGhostFirstPartyPrivilege(facts({ ghostId, builtin, marketRecord }))).toMatchObject({
-          brokerEligible: false, hostPrimitiveEligible: false,
-        });
-      }
+      expect(resolveGhostFirstPartyPrivilege(facts({ ghostId, builtin, marketRecord: null }))).toMatchObject({
+        brokerEligible: false, hostPrimitiveEligible: false,
+      });
     }
     expect(isUserInstallReservedGhostId(ghostId)).toBe(ghostId === 'cindy-helper');
     expect(resolveGhostFirstPartyPrivilege(facts({ ghostId, marketRecord: PUBLIC_RECORD })).hostPrimitiveEligible)
@@ -67,25 +65,23 @@ describe('first-party naming and approved source eligibility', () => {
     expect(resolveGhostFirstPartyPrivilege({ ...trusted, marketRecord: { ...trusted.marketRecord!, approvedPackageSha256: 'b'.repeat(64) } }).hostPrimitiveEligible).toBe(false);
   });
 
-  it('binds an official resource to exact approved identity and hash, not a prefix', () => {
-    for (const ghostId of ['helper', 'cindy-helper']) {
-      const trusted = facts({
-        ghostId, builtin: true, approvedPackageSha256: PACKAGE_SHA256,
-        trustedSource: { kind: 'builtin-official', ghostId, namespace: null, packageSha256: PACKAGE_SHA256 },
-      });
-      expect(resolveGhostFirstPartyPrivilege(trusted).hostPrimitiveEligible).toBe(true);
-      for (const changed of [
-        { ...trusted, ghostId: 'different' },
-        { ...trusted, namespace: 'xd' },
-        { ...trusted, approvedPackageSha256: null },
-        { ...trusted, approvedPackageSha256: 'b'.repeat(64) },
-        { ...trusted, trustedSource: { ...trusted.trustedSource!, packageSha256: 'invalid' }, approvedPackageSha256: 'invalid' },
-      ]) expect(resolveGhostFirstPartyPrivilege(changed).hostPrimitiveEligible).toBe(false);
-      const publicInstall = { ...trusted, builtin: false, marketRecord: PUBLIC_RECORD, trustedSource: null };
-      expect(resolveGhostFirstPartyPrivilege(publicInstall).hostPrimitiveEligible).toBe(ghostId === 'cindy-helper');
-      expect(resolveGhostFirstPartyPrivilege({ ...publicInstall, marketRecord: null }).hostPrimitiveEligible).toBe(false);
-      expect(resolveGhostFirstPartyPrivilege({ ...publicInstall, marketRecord: { ...PUBLIC_RECORD, sha256: 'b'.repeat(64) } }).hostPrimitiveEligible).toBe(false);
-    }
+  it.each(['helper', 'cindy-helper'])('binds official %s to exact approved identity and hash, not a prefix', (ghostId) => {
+    const trusted = facts({
+      ghostId, builtin: true, approvedPackageSha256: PACKAGE_SHA256,
+      trustedSource: { kind: 'builtin-official', ghostId, namespace: null, packageSha256: PACKAGE_SHA256 },
+    });
+    expect(resolveGhostFirstPartyPrivilege(trusted).hostPrimitiveEligible).toBe(true);
+    for (const changed of [
+      { ...trusted, ghostId: 'different' },
+      { ...trusted, namespace: 'xd' },
+      { ...trusted, approvedPackageSha256: null },
+      { ...trusted, approvedPackageSha256: 'b'.repeat(64) },
+      { ...trusted, trustedSource: { ...trusted.trustedSource!, packageSha256: 'invalid' }, approvedPackageSha256: 'invalid' },
+    ]) expect(resolveGhostFirstPartyPrivilege(changed).hostPrimitiveEligible).toBe(false);
+    const publicInstall = { ...trusted, builtin: false, marketRecord: PUBLIC_RECORD, trustedSource: null };
+    expect(resolveGhostFirstPartyPrivilege(publicInstall).hostPrimitiveEligible).toBe(ghostId === 'cindy-helper');
+    expect(resolveGhostFirstPartyPrivilege({ ...publicInstall, marketRecord: null }).hostPrimitiveEligible).toBe(false);
+    expect(resolveGhostFirstPartyPrivilege({ ...publicInstall, marketRecord: { ...PUBLIC_RECORD, sha256: 'b'.repeat(64) } }).hostPrimitiveEligible).toBe(false);
   });
 
   it('keeps an exact Cindy public resource usable without builtin facts or an organization prefix cache', () => {

@@ -1,8 +1,14 @@
 import { isValidPluginNamespace } from '@cindy/plugin-protocol';
 import { ghostInstallApprovalToken, isValidGhostId, type GhostInstallApproval } from './ghost.js';
 
-function isGhostIdValue(id: string): boolean {
-  return isValidGhostId(id);
+interface InstalledGhostIdentitySource {
+  manifest: { id: string };
+  dir?: string;
+  namespace?: string | null;
+}
+
+function isGhostIdValue(value: string): boolean {
+  return isValidGhostId(value);
 }
 
 /**
@@ -169,11 +175,7 @@ export function isGhostInstanceId(value: unknown): value is string {
   return typeof value === 'string' && parsePluginInstanceId(value) !== null;
 }
 
-export function installedGhostPhysicalRelId(ghost: {
-  manifest: { id: string };
-  dir?: string;
-  namespace?: string | null;
-}): string {
+export function installedGhostPhysicalRelId(ghost: InstalledGhostIdentitySource): string {
   if (typeof ghost.dir === 'string') {
     const fromDir = parseInstallRelIdFromDir(ghost.dir, ghost.manifest.id);
     if (fromDir) return fromDir;
@@ -204,13 +206,8 @@ function parseInstallRelIdFromDir(dir: string, ghostId: string): string | null {
   return null;
 }
 
-export function installedGhostStoragePart(ghost: {
-  manifest: { id: string };
-  dir?: string;
-  namespace?: string | null;
-}): string {
-  const identity = parsePluginInstallRelId(installedGhostPhysicalRelId(ghost));
-  return pluginStoragePart(identity ?? installedGhostLogicalIdentity(ghost));
+export function installedGhostStoragePart(ghost: InstalledGhostIdentitySource): string {
+  return installedGhostPhysicalKeys(ghost).storagePart;
 }
 
 /**
@@ -220,11 +217,7 @@ export function installedGhostStoragePart(ghost: {
  */
 export function resolvePluginLibraryStorageKey(
   instanceId: string,
-  ghost?: {
-    manifest: { id: string };
-    dir?: string;
-    namespace?: string | null;
-  } | null,
+  ghost?: InstalledGhostIdentitySource | null,
 ): string | null {
   if (ghost) return installedGhostStoragePart(ghost);
   if (isValidPluginStoragePart(instanceId)) return instanceId;
@@ -240,28 +233,31 @@ export function resolvePluginLibraryStorageKey(
  * `installedGhostLogicalIdentity` stops/uninstalls `_ns/<ns>/<id>` while OAuth,
  * KV and the runtime stay on `<id>`.
  */
-export function installedGhostPhysicalKeys(ghost: {
-  manifest: { id: string };
-  dir?: string;
-  namespace?: string | null;
-}): { relId: string; storagePart: string } {
+export function installedGhostPhysicalKeys(
+  ghost: InstalledGhostIdentitySource,
+): { relId: string; storagePart: string } {
   const relId = installedGhostPhysicalRelId(ghost);
-  return { relId, storagePart: installedGhostStoragePart(ghost) };
+  const identity = parsePluginInstallRelId(relId) ?? installedGhostLogicalIdentity(ghost);
+  return { relId, storagePart: pluginStoragePart(identity) };
 }
 
-/** In-memory runtime map key: `helper` or `_ns/acme/helper`. */
-export function installedGhostRuntimeId(ghost: {
-  manifest: { id: string };
-  dir?: string;
-  namespace?: string | null;
-}): string {
-  return installedGhostPhysicalRelId(ghost);
+export function installedGhostMutationTargetToken(
+  ghost: InstalledGhostIdentitySource & { dir: string; approval: GhostInstallApproval },
+  ownerScopeKey: string,
+): string | null {
+  if (ghost.approval.state !== 'approved') return null;
+  return JSON.stringify([
+    ownerScopeKey,
+    ghost.dir,
+    installedGhostStoragePart(ghost),
+    ghostInstallApprovalToken(ghost.approval),
+    deliveryNamespaceFields(ghost),
+  ]);
 }
 
-export function installedGhostLogicalIdentity(ghost: {
-  manifest: { id: string };
-  namespace?: string | null;
-}): PluginLogicalIdentity {
+export function installedGhostLogicalIdentity(
+  ghost: InstalledGhostIdentitySource,
+): PluginLogicalIdentity {
   return createPluginLogicalIdentity(
     hasDeliveryNamespace(ghost) ? ghost.namespace : null,
     ghost.manifest.id,
@@ -292,7 +288,7 @@ export function findInstalledGhostByInstanceId<T extends {
 }>(ghosts: readonly T[], instanceId: string): T | undefined {
   const byStorage = ghosts.find((ghost) => installedGhostStoragePart(ghost) === instanceId);
   if (byStorage) return byStorage;
-  const identity = parsePluginInstallRelId(instanceId);
+  const identity = parsePluginInstanceId(instanceId);
   return identity ? findInstalledGhostByIdentity(ghosts, identity) : undefined;
 }
 
@@ -390,16 +386,6 @@ export function pluginLedgerRecordKey(plugin: {
   return plugin.ghostId;
 }
 
-export function pluginIdentityFromLedgerRecord(plugin: {
-  ghostId: string;
-  namespace?: string | null;
-}): PluginLogicalIdentity {
-  return createPluginLogicalIdentity(
-    hasDeliveryNamespace(plugin) ? plugin.namespace : null,
-    plugin.ghostId,
-  );
-}
-
 /**
  * Same slash-command in a different known namespace may coexist.
  * A legacy (unstamped) holder still conflicts with everyone.
@@ -423,11 +409,7 @@ export function findConflictingGhostCommand<
     if (ghost.manifest.command === undefined) return false;
     if (ghost.manifest.command.toLowerCase() !== fold) return false;
     if (opts.exemptPhysicalRelId !== undefined) {
-      const rel = installedGhostPhysicalRelId({
-        manifest: { id: ghost.manifest.id },
-        dir: ghost.dir,
-        namespace: ghost.namespace,
-      });
+      const rel = installedGhostPhysicalRelId(ghost);
       if (rel === opts.exemptPhysicalRelId) return false;
     }
     if (!hasDeliveryNamespace(ghost)) return true;

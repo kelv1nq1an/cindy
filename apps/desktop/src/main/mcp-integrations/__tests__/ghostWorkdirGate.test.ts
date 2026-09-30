@@ -1922,9 +1922,9 @@ describe('ghost_call 兜底拒绝', () => {
 });
 
 describe('session-context 宿主铸造', () => {
-  it('pins a namespaced instance across revalidation when a public twin exists', async () => {
+  it.each([null, 'acme'])('pins namespace %s across revalidation when a twin exists', async (namespace) => {
     listMock.mockReturnValue([
-      chipGhost('art'),
+      chipGhost('art', ['tool', 'session-context']),
       {
         ...(chipGhost('art', ['tool', 'session-context']) as object),
         namespace: 'acme',
@@ -1940,7 +1940,7 @@ describe('session-context 宿主铸造', () => {
 
     const result = await makeDeps().callGhostTool({
       ghostId: 'art',
-      namespace: 'acme',
+      namespace,
       tool: 'run',
       args: {
         session_context: {
@@ -1954,12 +1954,12 @@ describe('session-context 宿主铸造', () => {
 
     expect(result).toMatchObject({ ok: true, result: 'done' });
     expect(ensureReadyMock).toHaveBeenCalledWith(
-      expect.objectContaining({ ghostId: '_ns__acme__art' }),
+      expect.objectContaining({ ghostId: namespace === null ? 'art' : '_ns__acme__art' }),
     );
     expect(dispatchMock).toHaveBeenCalledTimes(1);
     expect(dispatchMock).toHaveBeenCalledWith(
       expect.objectContaining({
-        ghostId: '_ns__acme__art',
+        ghostId: namespace === null ? 'art' : '_ns__acme__art',
         args: {
           session_context: {
             session_id: 's1',

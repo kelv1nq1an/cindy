@@ -728,6 +728,7 @@ describe('PluginPublisherOrchestrator', () => {
     { status: 503, code: 'INTERNAL_ERROR', expected: 'PUBLISH_UNSUPPORTED' },
     { status: 503, code: 'RATE_LIMIT_UNAVAILABLE', expected: 'RATE_LIMIT_UNAVAILABLE' },
     { status: 503, code: 'STORAGE_UNAVAILABLE', expected: 'STORAGE_UNAVAILABLE' },
+    { status: 409, code: 'PLUGIN_NAMESPACE_CLIENT_REQUIRED', expected: 'PLUGIN_NAMESPACE_CLIENT_REQUIRED' },
   ])('maps prepare $status/$code to $expected', async ({ status, code, expected }) => {
     const filePath = await packagePath();
     const snapshots: PluginPublisherProgress[] = [];
@@ -747,5 +748,8 @@ describe('PluginPublisherOrchestrator', () => {
     orch.start(filePath);
     const failed = await waitFor(snapshots, (progress) => progress.stage === 'failed');
     expect(failed.errorCode).toBe(expected);
+    if (code === 'PLUGIN_NAMESPACE_CLIENT_REQUIRED') {
+      expect(failed.message).toBe('请更新 Cindy 后再发布此组织的插件');
+    }
   });
 });

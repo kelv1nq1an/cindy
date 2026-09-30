@@ -8,6 +8,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
+import * as locks from '../../device-link/crossProcessLock.js';
 
 const scope = vi.hoisted(() => ({ dir: '' }));
 
@@ -17,6 +18,8 @@ vi.mock('../../maker-host/logger-adapter.js', () => ({
 }));
 vi.mock('../../appSessionState.js', () => ({
   ownerScopedUserDataPath: (...parts: string[]) => path.join(scope.dir, ...parts),
+  activeOwnerScopeKey: () => scope.dir,
+  isAppSessionBoundaryPending: () => false,
 }));
 
 const {
@@ -30,6 +33,7 @@ describe('relocateGhostWorkdirPrefs', () => {
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     fs.rmSync(scope.dir, { recursive: true, force: true });
   });
 
@@ -43,24 +47,24 @@ describe('relocateGhostWorkdirPrefs', () => {
     expect(listDisabledGhostIdsForWorkdir('/project/a')).toEqual(['_ns__acme__helper']);
   });
 
-  it('preserves existing destination disables and unrelated plugin preferences', async () => {
+  it('refuses existing destination disables without merging plugin preferences', async () => {
     setGhostDisabledForWorkdir('/project/a', 'helper', true);
     setGhostDisabledForWorkdir('/project/a', 'another', true);
     setGhostDisabledForWorkdir('/project/a', '_ns__acme__helper', true);
     setGhostDisabledForWorkdir('/project/b', '_ns__acme__helper', true);
-    await relocateGhostWorkdirPrefs('helper', '_ns__acme__helper');
-    expect(listDisabledGhostIdsForWorkdir('/project/a')).toEqual(['_ns__acme__helper', 'another']);
+    await expect(relocateGhostWorkdirPrefs('helper', '_ns__acme__helper')).rejects.toThrow(/collision/);
+    expect(listDisabledGhostIdsForWorkdir('/project/a')).toEqual(['_ns__acme__helper', 'another', 'helper']);
     expect(listDisabledGhostIdsForWorkdir('/project/b')).toEqual(['_ns__acme__helper']);
   });
 
-  it('restores exactly the previous disabled identities when a later relocation fails', async () => {
+  it('replays the inverse without relying on an in-memory rollback closure', async () => {
     setGhostDisabledForWorkdir('/project/a', 'helper', true);
     setGhostDisabledForWorkdir('/project/b', 'helper', true);
-    setGhostDisabledForWorkdir('/project/b', '_ns__acme__helper', true);
-    const rollback = await relocateGhostWorkdirPrefs('helper', '_ns__acme__helper');
-    await rollback();
+    await relocateGhostWorkdirPrefs('helper', '_ns__acme__helper');
+    await relocateGhostWorkdirPrefs('_ns__acme__helper', 'helper');
+    await relocateGhostWorkdirPrefs('_ns__acme__helper', 'helper');
     expect(listDisabledGhostIdsForWorkdir('/project/a')).toEqual(['helper']);
-    expect(listDisabledGhostIdsForWorkdir('/project/b')).toEqual(['_ns__acme__helper', 'helper']);
+    expect(listDisabledGhostIdsForWorkdir('/project/b')).toEqual(['helper']);
   });
 
   it('does not overwrite unreadable preferences; retry succeeds once repaired', async () => {
@@ -72,6 +76,83 @@ describe('relocateGhostWorkdirPrefs', () => {
     fs.writeFileSync(file, JSON.stringify({ disabledByWorkdir: { '/project/a': ['helper'] } }));
     await relocateGhostWorkdirPrefs('helper', '_ns__acme__helper');
     expect(listDisabledGhostIdsForWorkdir('/project/a')).toEqual(['_ns__acme__helper']);
+  });
+
+  it.each(['helper', 'another-plugin'])('blocks %s writes during lock release with unchanged mtime', async (id) => {
+    setGhostDisabledForWorkdir('/project/a', 'helper', true);
+    const file = path.join(scope.dir, 'ghost-workdir-prefs.json');
+    const time = new Date('2000-01-01T00:00:00Z');
+    fs.utimesSync(file, time, time);
+    listDisabledGhostIdsForWorkdir('/project/a');
+    const rename = fs.promises.rename;
+    let attempted = false;
+    let failure: unknown;
+    vi.spyOn(fs.promises, 'rename').mockImplementation(async (source, destination) => {
+      if (String(source) === file + '.lock' && String(destination).startsWith(file + '.lock.release-')) {
+        attempted = true;
+        fs.utimesSync(file, time, time);
+        try { setGhostDisabledForWorkdir('/project/a', id, true); } catch (error) { failure = error; }
+      }
+      await rename(source, destination);
+    });
+    await relocateGhostWorkdirPrefs('helper', '_ns__acme__helper');
+    expect(attempted).toBe(true);
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toMatch(/relocating/);
+    expect(listDisabledGhostIdsForWorkdir('/project/a')).toEqual(['_ns__acme__helper']);
+    setGhostDisabledForWorkdir('/project/a', 'another-plugin', true);
+    expect(listDisabledGhostIdsForWorkdir('/project/a')).toEqual(['_ns__acme__helper', 'another-plugin']);
+  });
+
+  it.each(['write', 'release'])('recovers after %s failure without restoring stale cache', async (stage) => {
+    setGhostDisabledForWorkdir('/project/a', 'helper', true);
+    const file = path.join(scope.dir, 'ghost-workdir-prefs.json');
+    const time = new Date('2000-01-01T00:00:00Z');
+    fs.utimesSync(file, time, time);
+    listDisabledGhostIdsForWorkdir('/project/a');
+    if (stage === 'write') {
+      const rename = fs.renameSync;
+      vi.spyOn(fs, 'renameSync').mockImplementation((source, destination) => {
+        if (String(destination) === file) throw new Error('simulated write failure');
+        rename(source, destination);
+      });
+    } else {
+      const withLock = locks.withCrossProcessLock;
+      vi.spyOn(locks, 'withCrossProcessLock').mockImplementationOnce(async (target, options, task, signal) => {
+        await withLock(target, options, task, signal);
+        fs.utimesSync(file, time, time);
+        throw new Error('simulated release failure');
+      });
+    }
+    await expect(relocateGhostWorkdirPrefs('helper', '_ns__acme__helper'))
+      .rejects.toThrow('simulated ' + stage + ' failure');
+    vi.restoreAllMocks();
+    setGhostDisabledForWorkdir('/project/a', 'another-plugin', true);
+    if (stage === 'release') {
+      expect(listDisabledGhostIdsForWorkdir('/project/a')).toEqual(['_ns__acme__helper', 'another-plugin']);
+    }
+    await relocateGhostWorkdirPrefs('helper', '_ns__acme__helper');
+    expect(listDisabledGhostIdsForWorkdir('/project/a')).toEqual(['_ns__acme__helper', 'another-plugin']);
+  });
+
+  it('allows another owner to write while this owner releases its lock', async () => {
+    setGhostDisabledForWorkdir('/project/a', 'helper', true);
+    const originalDir = scope.dir;
+    const withLock = locks.withCrossProcessLock;
+    vi.spyOn(locks, 'withCrossProcessLock').mockImplementationOnce(async (target, options, task, signal) => {
+      const result = await withLock(target, options, task, signal);
+      scope.dir = path.join(originalDir, 'owner-b');
+      try {
+        expect(setGhostDisabledForWorkdir('/project/b', 'helper', true)).toEqual(['helper']);
+      } finally {
+        scope.dir = originalDir;
+      }
+      return result;
+    });
+    await relocateGhostWorkdirPrefs('helper', '_ns__acme__helper');
+    expect(listDisabledGhostIdsForWorkdir('/project/a')).toEqual(['_ns__acme__helper']);
+    expect(JSON.parse(fs.readFileSync(path.join(originalDir, 'owner-b', 'ghost-workdir-prefs.json'), 'utf8')))
+      .toEqual({ disabledByWorkdir: { '/project/b': ['helper'] } });
   });
 });
 

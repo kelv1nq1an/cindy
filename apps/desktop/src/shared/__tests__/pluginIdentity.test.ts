@@ -22,7 +22,7 @@ import {
   installedGhostLogicalIdentity,
   installedGhostPhysicalKeys,
   installedGhostPhysicalRelId,
-  installedGhostRuntimeId,
+  installedGhostMutationTargetToken,
   installedGhostStoragePart,
   resolvePluginLibraryStorageKey,
   resolvePluginNamespaceState,
@@ -58,29 +58,14 @@ describe('plugin logical identity', () => {
       namespace: 'acme' as string | null,
       currentRelease: { id: 'release-1' },
     };
-    expect(downloadIdentityMatchesPlugin({}, plugin)).toBe(true);
-    expect(
-      downloadIdentityMatchesPlugin(
-        {
-          pluginId: plugin.id,
-          releaseId: 'release-1',
-          ghostId: 'helper',
-          namespace: 'acme',
-        },
-        plugin,
-      ),
-    ).toBe(true);
-    expect(
-      downloadIdentityMatchesPlugin(
-        {
-          pluginId: plugin.id,
-          releaseId: 'release-1',
-          ghostId: 'helper',
-          namespace: null,
-        },
-        plugin,
-      ),
-    ).toBe(false);
+    const cases: [Parameters<typeof downloadIdentityMatchesPlugin>[0], boolean][] = [
+      [{}, true],
+      [{ pluginId: plugin.id, releaseId: 'release-1', ghostId: 'helper', namespace: 'acme' }, true],
+      [{ pluginId: plugin.id, releaseId: 'release-1', ghostId: 'helper', namespace: null }, false],
+    ];
+    for (const [download, expected] of cases) {
+      expect(downloadIdentityMatchesPlugin(download, plugin)).toBe(expected);
+    }
   });
 
   it('encodes filesystem-safe install directories without moving root installs', () => {
@@ -144,22 +129,15 @@ describe('plugin logical identity', () => {
   it('does not let a delivery target inherit a same-name instance from another namespace', () => {
     const root = { manifest: { id: 'helper' }, namespace: null };
     const enterprise = { manifest: { id: 'helper' }, namespace: 'acme' };
-    expect(findInstalledGhostForDeliveryTarget([root], { ghostId: 'helper' })).toEqual(root);
-    expect(
-      findInstalledGhostForDeliveryTarget([root, enterprise], { ghostId: 'helper' }),
-    ).toBeUndefined();
-    expect(
-      findInstalledGhostForDeliveryTarget([root, enterprise], {
-        ghostId: 'helper',
-        namespace: 'acme',
-      }),
-    ).toEqual(enterprise);
-    expect(
-      findInstalledGhostForDeliveryTarget([root, enterprise], {
-        ghostId: 'helper',
-        namespace: null,
-      }),
-    ).toEqual(root);
+    const cases = [
+      [[root], { ghostId: 'helper' }, root],
+      [[root, enterprise], { ghostId: 'helper' }, undefined],
+      [[root, enterprise], { ghostId: 'helper', namespace: 'acme' }, enterprise],
+      [[root, enterprise], { ghostId: 'helper', namespace: null }, root],
+    ] as const;
+    for (const [ghosts, target, expected] of cases) {
+      expect(findInstalledGhostForDeliveryTarget(ghosts, target)).toEqual(expected);
+    }
   });
 
   it('encodes vault-safe storage parts without moving root files', () => {
@@ -173,41 +151,64 @@ describe('plugin logical identity', () => {
     expect(parsePluginStoragePart('_ns__acme__helper__extra')).toBeNull();
     expect(isValidPluginStoragePart('_ns__acme__helper')).toBe(true);
     expect(isValidPluginStoragePart('../helper')).toBe(false);
-    expect(installedGhostStoragePart({ manifest: { id: 'helper' }, namespace: 'acme' })).toBe(
-      '_ns__acme__helper',
-    );
-    expect(installedGhostRuntimeId({ manifest: { id: 'helper' }, namespace: 'acme' })).toBe(
-      '_ns/acme/helper',
-    );
     expect(pluginStoragePart(root)).not.toBe(pluginStoragePart(enterprise));
-    expect(
-      installedGhostStoragePart({
-        manifest: { id: 'helper' },
-        namespace: 'acme',
-        dir: '/userData/cindy-brain/helper',
-      }),
-    ).toBe('helper');
-    expect(
-      installedGhostRuntimeId({
-        manifest: { id: 'helper' },
-        namespace: 'acme',
-        dir: '/userData/cindy-brain/helper',
-      }),
-    ).toBe('helper');
-    expect(
-      installedGhostPhysicalRelId({
-        manifest: { id: 'helper' },
-        namespace: 'acme',
-        dir: '/userData/cindy-brain/_ns/acme/helper',
-      }),
-    ).toBe('_ns/acme/helper');
-    expect(
-      installedGhostStoragePart({
-        manifest: { id: 'helper' },
-        namespace: 'acme',
-        dir: '/userData/cindy-brain/_ns/acme/helper',
-      }),
-    ).toBe('_ns__acme__helper');
+    const cases = [
+      [{}, '_ns/acme/helper', '_ns__acme__helper'],
+      [{ dir: '/userData/cindy-brain/helper' }, 'helper', 'helper'],
+      [{ dir: '/userData/cindy-brain/_ns/acme/helper' }, '_ns/acme/helper', '_ns__acme__helper'],
+    ] as const;
+    for (const [physical, relId, storagePart] of cases) {
+      const ghost = { manifest: { id: 'helper' }, namespace: 'acme', ...physical };
+      expect(installedGhostPhysicalRelId(ghost)).toBe(relId);
+      expect(installedGhostStoragePart(ghost)).toBe(storagePart);
+    }
+  });
+
+  it('binds mutation tickets to the owner, physical installation and approval', () => {
+    const ghost = {
+      manifest: { id: 'helper' },
+      dir: '/userData/cindy-brain/helper',
+      namespace: 'acme',
+      approval: { state: 'approved' as const, revision: 'receipt-1' },
+    };
+    const token = installedGhostMutationTargetToken(ghost, 'owner-1');
+    expect(token).toBe(JSON.stringify([
+      'owner-1', ghost.dir, 'helper', 'approved:receipt-1', { namespace: 'acme' },
+    ]));
+    expect(installedGhostMutationTargetToken({ ...ghost }, 'owner-1')).toBe(token);
+    expect(installedGhostMutationTargetToken(ghost, 'owner-2')).not.toBe(token);
+    for (const changed of [
+      { ...ghost, dir: '/other/cindy-brain/helper' },
+      { ...ghost, dir: '/userData/cindy-brain/_ns/acme/helper' },
+      { ...ghost, approval: { state: 'approved' as const, revision: 'receipt-2' } },
+      { ...ghost, namespace: null },
+    ]) {
+      expect(installedGhostMutationTargetToken(changed, 'owner-1')).not.toBe(token);
+    }
+  });
+
+  it('keeps legacy, root and organization distinct in mutation tickets', () => {
+    const ghost = {
+      manifest: { id: 'helper' }, dir: '/userData/cindy-brain/helper',
+      approval: { state: 'approved' as const, revision: 'receipt-1' },
+    };
+    const namespaces = [{}, { namespace: null }, { namespace: 'acme' }];
+    const tokens = namespaces.map((namespace) =>
+      installedGhostMutationTargetToken({ ...ghost, ...namespace }, 'owner-1'));
+    expect(new Set(tokens).size).toBe(3);
+    for (const state of ['legacy-unapproved', 'invalid'] as const) {
+      expect(installedGhostMutationTargetToken({ ...ghost, approval: { state } }, 'owner-1')).toBeNull();
+    }
+  });
+
+  it('resolves namespace aliases for an in-place stamped installation', () => {
+    const stamped = {
+      manifest: { id: 'helper' }, namespace: 'acme',
+      dir: '/userData/cindy-brain/helper',
+    };
+    for (const instanceId of ['helper', '_ns/acme/helper', '_ns__acme__helper']) {
+      expect(findInstalledGhostByInstanceId([stamped], instanceId)).toBe(stamped);
+    }
   });
 
   it('resolves UI instance ids by physical storage part first', () => {

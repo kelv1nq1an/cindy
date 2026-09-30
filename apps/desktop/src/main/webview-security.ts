@@ -875,9 +875,10 @@ export function installGhostGuestNavigationHandlers(
     installGhostMediaHandoverSource(hostContents, guestContents, { ghostId, instanceId }, () => isOwnerActive() && isAttachCurrent());
   }
   guestContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  const isCurrent = () => isOwnerActive() && (!isAttachCurrent || isAttachCurrent());
   const noteGesture = () => {
-    if (!isOwnerActive()) return;
-    (handlers.gesture ?? noteGhostUserGesture)(ghostId);
+    if (!isCurrent()) return;
+    (handlers.gesture ?? noteGhostUserGesture)(instanceId ?? ghostId);
   };
   guestContents.on('before-mouse-event', (_event, mouse) => {
     if (mouse.type === 'mouseDown') noteGesture();
@@ -888,7 +889,7 @@ export function installGhostGuestNavigationHandlers(
   guestContents.on('will-navigate', (event, url) => {
     // owner commit 后、Renderer 卸载旧 guest 前仍可能收到导航事件。旧页
     // 不能借新 owner 的同名插件声明或授权代开外链。
-    if (!isOwnerActive()) {
+    if (!isCurrent()) {
       event.preventDefault();
       return;
     }
@@ -896,9 +897,9 @@ export function installGhostGuestNavigationHandlers(
     if (nav === 'allow') return;
     event.preventDefault();
     if (nav === 'preview') {
-      handlers.preview(ghostId, url, hostContents, guestContents, isOwnerActive, instanceId);
+      handlers.preview(ghostId, url, hostContents, guestContents, isCurrent, instanceId);
     } else if (nav === 'external') {
-      handlers.external(ghostId, url, hostContents, guestContents, isOwnerActive);
+      handlers.external(ghostId, url, hostContents, guestContents, isCurrent, instanceId);
     }
   });
 }

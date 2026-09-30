@@ -114,11 +114,14 @@ export async function assertLibraryMetaOwner(root: string, ownerId: string): Pro
   if (meta && meta.ghostId !== ownerId) throw new Error('library meta belongs to a different plugin');
 }
 
-export async function relocateLibraryMetaOwner(root: string, fromId: string, toId: string): Promise<boolean> {
+export async function relocateLibraryMetaOwner(
+  root: string, fromId: string, toId: string, assertCurrent: () => void = () => {},
+): Promise<boolean> {
   if (!isValidPluginStoragePart(fromId) || !isValidPluginStoragePart(toId)) {
     throw new Error('library meta relocate ids are invalid');
   }
   const meta = await readLibraryMeta(root);
+  assertCurrent();
   if (!meta) return false;
   const owner = meta.ghostId;
   if (owner === toId) return false;
@@ -127,6 +130,7 @@ export async function relocateLibraryMetaOwner(root: string, fromId: string, toI
   const temporary = file + '.' + randomUUID() + '.tmp';
   try {
     await fs.promises.writeFile(temporary, JSON.stringify({ ...meta, ghostId: toId }), { flag: 'wx', mode: 0o600 });
+    assertCurrent();
     await fs.promises.rename(temporary, file);
   } finally {
     await fs.promises.rm(temporary, { force: true });

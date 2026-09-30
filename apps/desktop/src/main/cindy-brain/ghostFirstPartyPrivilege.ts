@@ -181,7 +181,9 @@ export function isTrustedMivoSecretAlias(facts: GhostFirstPartyFacts, pendingLeg
   const record = facts.marketRecord;
   const organization = facts.currentOrganization;
   if (!record || record.source !== 'market' || record.scope !== 'organization' ||
-      !record.installed || organization?.orgSlug !== 'xd' ||
+      !record.installed || !organization ||
+      !(organization.orgSlug === 'xd' || (organization.orgSlug == null &&
+        (facts.namespace === 'xd' || organization.pluginPrefix === 'xd'))) ||
       record.organizationId !== organization.organizationId) return false;
   return (facts.namespace === 'xd' || (facts.namespace === null && pendingLegacy)) &&
     marketInstallationMatchesApprovedPackage(record, organization);

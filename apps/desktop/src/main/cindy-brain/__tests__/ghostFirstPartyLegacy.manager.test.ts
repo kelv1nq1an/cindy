@@ -1,11 +1,11 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import JSZip from 'jszip';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ghostInstallApprovalToken, validateGhostManifest } from '../../../shared/ghost.js';
 import { GhostManager } from '../GhostManager.js';
 import { createGhostInstallReceipt, GhostInstallReceiptStore } from '../ghostInstallReceipt.js';
+import { writeTestCindyPackage } from './cindyPackageFixture.js';
 
 const roots: string[] = [];
 const PACKAGE_SHA256 = 'a'.repeat(64);
@@ -42,14 +42,10 @@ async function fixture(official = false) {
     return receipt;
   };
   const receipt = await plant('filo-helper');
-  const packageFile = async () => {
-    const zip = new JSZip();
-    zip.file('ghost.json', JSON.stringify({ ...raw, version: '2.0.0' }));
-    zip.file('main.js', 'module.exports = { version: 2 };');
-    const file = path.join(root, 'update.cindy');
-    fs.writeFileSync(file, await zip.generateAsync({ type: 'nodebuffer' }));
-    return file;
-  };
+  const packageFile = () => writeTestCindyPackage(
+    path.join(root, 'update.cindy'), { ...raw, version: '2.0.0' },
+    { 'main.js': 'module.exports = { version: 2 };' },
+  );
   return { root, contentRoot, stateRoot, store, receipt, plant, packageFile };
 }
 

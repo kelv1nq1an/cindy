@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type { PluginPublisherApiDeps } from '../api.js';
 import type { PluginPublisherOrchestratorDeps } from '../orchestrator.js';
 
 const mocks = vi.hoisted(() => ({
@@ -28,7 +29,7 @@ vi.mock('../../logger.js', () => ({ createLogger: () => ({ info: vi.fn(), warn: 
 vi.mock('../../lifecycle.js', () => ({ onQuit: vi.fn() }));
 vi.mock('../api.js', () => ({
   PluginPublisherApi: class {
-    constructor(public deps: { getToken(): Promise<string>; invalidateToken(): void }) {}
+    constructor(public deps: PluginPublisherApiDeps) {}
   },
 }));
 vi.mock('../orchestrator.js', () => ({
@@ -82,6 +83,12 @@ describe('publisher old-token organization compatibility', () => {
     expect(mocks.refresh).toHaveBeenCalledTimes(1);
   });
 
+  it('provides the running app version to the publisher HTTP client', async () => {
+    (await host()).getPluginPublisherOrchestrator();
+    const api = dependencies().api as unknown as { deps: PluginPublisherApiDeps };
+    expect(api.deps.getClientVersion()).toBe('1.0.0');
+  });
+
   it('rejects a valid market namespace for a foreign organization even with the same legal prefix', async () => {
     mocks.listAll.mockResolvedValue({
       plugins: [], removals: [],
@@ -93,17 +100,26 @@ describe('publisher old-token organization compatibility', () => {
     expect(mocks.getToken).not.toHaveBeenCalled();
   });
 
-  it.each(['membership', 'organization', 'owner'])('rejects a late market namespace after %s changes', async (change) => {
+  it.each(
+    ['refresh', 'market'].flatMap((phase) =>
+      ['membership', 'organization', 'owner'].map((change) => ({ phase, change })),
+    ),
+  )('rejects a late namespace after $change changes during $phase', async ({ phase, change }) => {
     const publisher = await host();
-    mocks.listAll.mockImplementation(async () => {
+    const changeContext = () => {
+      const next = member(phase === 'refresh' ? 'actual-org' : undefined);
+      if (change === 'membership') next.user.id = 'member-2';
+      if (change === 'organization') next.user.orgId = 'org-2';
       if (change === 'owner') mocks.owner.mockReturnValue({ dataOwnerId: 'member-1', ownerGeneration: 2 });
-      else {
-        const next = member();
-        if (change === 'membership') next.user.id = 'member-2';
-        else next.user.orgId = 'org-2';
-        mocks.auth.mockReturnValue(next);
-      }
+      mocks.auth.mockReturnValue(next);
       mocks.authListener.mock.calls[0][0]();
+    };
+    mocks.refresh.mockImplementation(async () => {
+      if (phase === 'refresh') changeContext();
+      return true;
+    });
+    mocks.listAll.mockImplementation(async () => {
+      changeContext();
       return {
         plugins: [], removals: [],
         currentOrganization: { organizationId: 'org-1', orgSlug: 'actual-org', pluginPrefix: 'legacy' },
@@ -113,6 +129,7 @@ describe('publisher old-token organization compatibility', () => {
     expect(await dependencies().identity()).toBeNull();
     expect(mocks.getToken).not.toHaveBeenCalled();
     expect(mocks.abort).toHaveBeenCalledTimes(1);
+    expect(mocks.listAll).toHaveBeenCalledTimes(phase === 'market' ? 1 : 0);
   });
 
   it('does not use a prefix as a namespace when the market row has no orgSlug', async () => {
@@ -195,32 +212,6 @@ describe('publisher old-token organization compatibility', () => {
     });
     expect(() => publisher.publisherAudience(null as unknown as string)).toThrow();
     expect(mocks.getToken).not.toHaveBeenCalled();
-  });
-
-  it('does not adopt another membership returned during refresh', async () => {
-    const publisher = await host();
-    mocks.refresh.mockImplementation(async () => {
-      const next = member('foreign-org');
-      next.user.id = 'member-2';
-      mocks.auth.mockReturnValue(next);
-      return true;
-    });
-    publisher.startPluginPublish('/tmp/xd-helper.cindy');
-    expect(await dependencies().identity()).toBeNull();
-    expect(mocks.getToken).not.toHaveBeenCalled();
-  });
-
-  it('does not continue after the owner generation changes during refresh', async () => {
-    const publisher = await host();
-    mocks.refresh.mockImplementation(async () => {
-      mocks.auth.mockReturnValue(member('actual-org'));
-      mocks.owner.mockReturnValue({ dataOwnerId: 'member-1', ownerGeneration: 2 });
-      mocks.authListener.mock.calls[0][0]();
-      return true;
-    });
-    publisher.startPluginPublish('/tmp/xd-helper.cindy');
-    expect(await dependencies().identity()).toBeNull();
-    expect(mocks.abort).toHaveBeenCalledTimes(1);
   });
 
   it('still rejects personal membership and an explicitly invalid namespace', async () => {

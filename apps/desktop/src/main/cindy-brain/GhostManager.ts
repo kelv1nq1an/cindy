@@ -594,7 +594,7 @@ export class GhostManager {
   /** Owner namespaces whose mutation journal could not be authoritatively scanned. */
   private readonly recoveryBlockedApprovalNamespaces = new Set<string>();
   private readonly pendingRecoverySideEffects = new Set<Promise<void>>();
-  private readonly pendingArchiveRecoveries = new Set<string>();
+  private readonly pendingMutationRecoveries = new Set<string>();
   private recoveryRetry: Promise<void> | null = null;
 
   /**
@@ -1227,33 +1227,43 @@ export class GhostManager {
                 !hasDeliveryNamespace(sourceApproval.receipt)) {
               throw new Error('relocate journal conflicts with an installed root plugin');
             }
-            if (sourceApproval.state === 'approved') this.receiptStore.removeSync(marker.fromRelId);
-            const relocated = this.options.onPhysicalRelocated?.(marker.fromRelId, marker.toRelId);
-            if (relocated && typeof (relocated as Promise<void>).then === 'function') {
-              const recovery = (relocated as Promise<void>)
-                .then(() => {
-                  if (this.currentOwnerContextKey() !== recoveryOwner) return;
-                  this.receiptStore.clearPendingMutationSync(id);
-                  this.untrustedApprovals.delete(sourceIsolation);
-                  this.untrustedApprovals.delete(destIsolation);
-                  this.options.onPhysicalRelocateCommitted?.(marker.toRelId);
-                })
-                .catch((error) => {
-                  this.untrustedApprovals.add(sourceIsolation);
-                  this.untrustedApprovals.add(destIsolation);
-                  this.options.log?.warn('ghost relocate recovery side effect failed', {
-                    fromRelId: marker.fromRelId,
-                    toRelId: marker.toRelId,
-                    error: error instanceof Error ? error.message : String(error),
-                  });
+            if (!this.pendingMutationRecoveries.has(sourceIsolation)) {
+              const destApproval = this.receiptStore.readForRecovery(marker.toRelId);
+              this.pendingMutationRecoveries.add(sourceIsolation);
+              const recovery = this.runExclusiveMutation(async () => {
+                const assertRecoveryCurrent = () => {
+                  if (this.currentOwnerContextKey() !== recoveryOwner ||
+                      JSON.stringify(this.receiptStore.readPendingMutationSync(id)) !== JSON.stringify(markerResult) ||
+                      JSON.stringify(this.receiptStore.readForRecovery(marker.toRelId)) !== JSON.stringify(destApproval)) {
+                    throw new Error('relocate recovery transaction superseded');
+                  }
+                };
+                assertRecoveryCurrent();
+                if (JSON.stringify(this.receiptStore.readForRecovery(marker.fromRelId)) !== JSON.stringify(sourceApproval)) {
+                  throw new Error('relocate recovery source superseded');
+                }
+                if (sourceApproval.state === 'approved') this.receiptStore.removeSync(marker.fromRelId);
+                await this.options.onPhysicalRelocated?.(marker.fromRelId, marker.toRelId);
+                assertRecoveryCurrent();
+                this.receiptStore.clearPendingMutationSync(id);
+                this.untrustedApprovals.delete(sourceIsolation);
+                this.untrustedApprovals.delete(destIsolation);
+                this.options.onPhysicalRelocateCommitted?.(marker.toRelId);
+              }).catch((error) => {
+                this.options.log?.warn('ghost relocate recovery side effect failed', {
+                  fromRelId: marker.fromRelId,
+                  toRelId: marker.toRelId,
+                  error: error instanceof Error ? error.message : String(error),
                 });
+              });
               this.pendingRecoverySideEffects.add(recovery);
               const clearRecovery = () => {
                 this.pendingRecoverySideEffects.delete(recovery);
+                this.pendingMutationRecoveries.delete(sourceIsolation);
               };
               void recovery.then(clearRecovery, clearRecovery);
-              continue;
             }
+            continue;
           } else if (sourceKind === 'directory') {
             this.receiptStore.removeSync(marker.toRelId);
           } else {
@@ -1324,11 +1334,11 @@ export class GhostManager {
                 throw new Error('source archive update rollback has no verified backup');
               }
               const recoveryKey = this.isolationKey(id);
-              if (!this.pendingArchiveRecoveries.has(recoveryKey)) {
+              if (!this.pendingMutationRecoveries.has(recoveryKey)) {
                 const recoveryOwner = this.currentOwnerContextKey();
                 const fromPart = pluginStoragePart(parsePluginInstallRelId(id)!);
                 const archivePart = marker.sourceStateArchiveId;
-                this.pendingArchiveRecoveries.add(recoveryKey);
+                this.pendingMutationRecoveries.add(recoveryKey);
                 const recovery = this.runExclusiveMutation(async () => {
                   let expectedMarker = marker;
                   const assertRecoveryCurrent = () => {
@@ -1372,7 +1382,7 @@ export class GhostManager {
                 this.pendingRecoverySideEffects.add(recovery);
                 const clearRecovery = () => {
                   this.pendingRecoverySideEffects.delete(recovery);
-                  this.pendingArchiveRecoveries.delete(recoveryKey);
+                  this.pendingMutationRecoveries.delete(recoveryKey);
                 };
                 void recovery.then(clearRecovery, clearRecovery);
               }

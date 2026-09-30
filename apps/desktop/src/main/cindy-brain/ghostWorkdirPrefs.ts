@@ -27,6 +27,7 @@ import path from 'node:path';
 import { desktopMakerLogger } from '../maker-host/logger-adapter.js';
 import { createOverrideSettingsFile } from '../maker-host/override-settings-file.js';
 import { ownerScopedUserDataPath } from '../appSessionState.js';
+import { assertGhostPrefsWritable, updateGhostPrefsForRelocation } from './ghostPreferenceRelocation.js';
 
 const log = desktopMakerLogger.child('ghost-workdir-prefs');
 
@@ -71,14 +72,18 @@ function normalize(raw: unknown): GhostWorkdirPrefs {
   return { disabledByWorkdir };
 }
 
-const store = createOverrideSettingsFile<GhostWorkdirPrefs>({
-  filePath: () => ownerScopedUserDataPath('ghost-workdir-prefs.json'),
-  defaults: DEFAULTS,
-  normalize,
-  log,
-  label: 'ghost-workdir-prefs',
-  preserveUnreadableFile: true,
-});
+function createStore() {
+  return createOverrideSettingsFile<GhostWorkdirPrefs>({
+    filePath: () => ownerScopedUserDataPath('ghost-workdir-prefs.json'),
+    defaults: DEFAULTS,
+    normalize,
+    log,
+    label: 'ghost-workdir-prefs',
+    preserveUnreadableFile: true,
+  });
+}
+
+let store = createStore();
 
 function readPrefs(): GhostWorkdirPrefs {
   store.invalidateIfChanged();
@@ -98,6 +103,7 @@ export function isGhostDisabledForWorkdir(ghostId: string, workdir: string | nul
 
 /** 写入目录级例外;返回该目录写后的禁用列表(供 IPC 回包)。 */
 export function setGhostDisabledForWorkdir(workdir: string, ghostId: string, disabled: boolean): string[] {
+  assertGhostPrefsWritable('ghost-workdir-prefs.json');
   const key = normalizeWorkdirKey(workdir);
   if (key.length === 0) throw new Error('workdir must be a non-empty path');
   const current = readPrefs().disabledByWorkdir;
@@ -113,31 +119,33 @@ export function setGhostDisabledForWorkdir(workdir: string, ghostId: string, dis
 }
 
 /** 原位组织插件改用 namespace 物理 ID 时，保留各项目的禁用例外。 */
-export async function relocateGhostWorkdirPrefs(fromPart: string, toPart: string): Promise<() => Promise<void>> {
-  if (fromPart === toPart) return async () => {};
-  const moved = new Map<string, boolean>();
-  await store.updateAtomic(({ value }) => {
-    const next = { ...value.disabledByWorkdir };
-    for (const [workdir, disabled] of Object.entries(next)) {
-      if (!disabled.includes(fromPart)) continue;
-      moved.set(workdir, disabled.includes(toPart));
-      next[workdir] = [...new Set([...disabled.filter((id) => id !== fromPart), toPart])].sort();
+export async function relocateGhostWorkdirPrefs(fromPart: string, toPart: string): Promise<void> {
+  if (fromPart === toPart) return;
+  await updateGhostPrefsForRelocation('ghost-workdir-prefs.json', (raw) => {
+    const map = raw.disabledByWorkdir;
+    if (map === undefined) return {};
+    if (map === null || typeof map !== 'object' || Array.isArray(map)) {
+      throw new Error('ghost workdir preferences are unreadable');
     }
-    return { disabledByWorkdir: next };
+    const entries = Object.entries(map);
+    if (entries.some(([, ids]) => !Array.isArray(ids) || ids.some((id) => typeof id !== 'string'))) {
+      throw new Error('ghost workdir preferences are unreadable');
+    }
+    const disabled = map as Record<string, string[]>;
+    if (!Object.values(disabled).some((ids) => ids.includes(fromPart))) return {};
+    if (Object.values(disabled).some((ids) => ids.includes(toPart))) {
+      throw new Error('ghost workdir preferences relocation destination collision');
+    }
+    return {
+      disabledByWorkdir: Object.fromEntries(
+        Object.entries(disabled).map(([workdir, ids]) => [
+          workdir, ids.map((id) => id === fromPart ? toPart : id),
+        ]),
+      ),
+    };
+  }, () => {
+    store = createStore();
   });
-  return async () => {
-    if (moved.size === 0) return;
-    await store.updateAtomic(({ value }) => {
-      const next = { ...value.disabledByWorkdir };
-      for (const [workdir, hadDestination] of moved) {
-        const disabled = new Set(next[workdir] ?? []);
-        disabled.add(fromPart);
-        if (!hadDestination) disabled.delete(toPart);
-        next[workdir] = [...disabled].sort();
-      }
-      return { disabledByWorkdir: next };
-    });
-  };
 }
 
 /** 测试钩子(仅纯函数;读写链路由 IPC / 生效点测试覆盖)。 */

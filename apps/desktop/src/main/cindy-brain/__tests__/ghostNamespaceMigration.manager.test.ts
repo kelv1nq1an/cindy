@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { InstalledGhost } from '../../../shared/ghost.js';
 import { createOrganizationPrefixStore } from '../../plugin-market/organizationPrefixStore.js';
 import { PluginMarketLedger } from '../../plugin-market/ledger.js';
-import { GhostManager } from '../GhostManager.js';
+import { GhostManager, type GhostManagerOptions } from '../GhostManager.js';
 import {
   classifyNamespaceMigration,
   readNamespaceMigrationInstallOrigin,
@@ -19,24 +19,31 @@ import {
   hashApprovedSkillContent,
 } from '../ghostInstallReceipt.js';
 import { runGhostSnapshotWorkerRequest } from '../ghostSnapshotWorkerProcess.js';
-import JSZip from 'jszip';
+import { writeTestCindyPackage } from './cindyPackageFixture.js';
 
 let workDir: string;
 let rootDir: string;
 let manager: GhostManager;
+
+const mutateSnapshot: NonNullable<GhostManagerOptions['mutateSnapshot']> = async ({ parentDir, ...request }) => {
+  await runGhostSnapshotWorkerRequest(request, parentDir);
+};
+
+function createManager(options: Omit<GhostManagerOptions, 'getRootDir'> = {}): GhostManager {
+  return new GhostManager({ getRootDir: () => rootDir, ...options });
+}
+
+function receiptStore(mutation?: GhostManagerOptions['mutateSnapshot']): GhostInstallReceiptStore {
+  const stateRoot = path.join(workDir, 'ghosts-install-state');
+  return new GhostInstallReceiptStore(() => stateRoot, mutation);
+}
 
 beforeEach(async () => {
   workDir = fs.realpathSync.native(
     await fs.promises.mkdtemp(path.join(os.tmpdir(), 'cindy-ns-mig-mgr-')),
   );
   rootDir = path.join(workDir, 'ghosts');
-  manager = new GhostManager({
-    getRootDir: () => rootDir,
-    mutateSnapshot: async (request) => {
-      const { parentDir, ...workerRequest } = request;
-      await runGhostSnapshotWorkerRequest(workerRequest, parentDir);
-    },
-  });
+  manager = createManager({ mutateSnapshot });
 });
 
 afterEach(async () => {
@@ -85,7 +92,7 @@ it('does not recover an interrupted namespaced uninstall through a linked conten
   await fs.promises.symlink(outside, path.join(rootDir, '_ns'), 'dir');
   const store = new GhostInstallReceiptStore(() => stateRoot);
   await store.writePendingMutation('_ns/acme/hello', { kind: 'uninstall' });
-  manager = new GhostManager({ getRootDir: () => rootDir, getStateDir: () => stateRoot });
+  manager = createManager({ getStateDir: () => stateRoot });
   expect(fs.readFileSync(path.join(outside, 'acme', 'hello', 'sentinel'), 'utf8')).toBe('keep');
   expect(store.readPendingMutationSync('_ns/acme/hello').state).toBe('valid');
 });
@@ -128,14 +135,7 @@ async function plantLegacyInstall(
     await fs.promises.writeFile(path.join(dir, 'skills', 'demo', 'SKILL.md'),
       '---\nname: demo\ndescription: Demo skill\n---\n\nDemo\n');
   }
-  const stateRoot = path.join(workDir, 'ghosts-install-state');
-  const store = new GhostInstallReceiptStore(
-    () => stateRoot,
-    async ({ parentDir, ...request }) => {
-      await runGhostSnapshotWorkerRequest(request, parentDir);
-    },
-  );
-  const normalized = declared as never;
+  const store = receiptStore(mutateSnapshot);
   const approvedManifest = {
     ...declared,
   } as InstalledGhost['manifest'];
@@ -155,16 +155,35 @@ async function plantLegacyInstall(
     }),
     { skillSourceDir: dir },
   );
-  void normalized;
 }
 
 async function makeCindy(id: string): Promise<string> {
-  const zip = new JSZip();
-  zip.file('ghost.json', JSON.stringify(manifest(id)));
-  zip.file('main.js', '// ok\n');
-  const filePath = path.join(workDir, `${id}.cindy`);
-  await fs.promises.writeFile(filePath, await zip.generateAsync({ type: 'nodebuffer' }));
-  return filePath;
+  return writeTestCindyPackage(path.join(workDir, `${id}.cindy`), manifest(id));
+}
+
+async function stampLegacyOrganizationInstall(id = 'hello', withSkill = false): Promise<void> {
+  await plantLegacyInstall(id, withSkill);
+  manager.list();
+  await manager.commitPendingNamespace(id, 'acme', 'market-organization');
+}
+
+async function plantInterruptedRelocation(): Promise<{ dest: string; receipts: GhostInstallReceiptStore }> {
+  await stampLegacyOrganizationInstall();
+  const dest = path.join(rootDir, '_ns', 'acme', 'hello');
+  await fs.promises.mkdir(path.dirname(dest), { recursive: true });
+  await fs.promises.rename(path.join(rootDir, 'hello'), dest);
+  const receipts = receiptStore(mutateSnapshot);
+  const current = receipts.read('hello');
+  expect(current.state).toBe('approved');
+  if (current.state !== 'approved') throw new Error('expected approved receipt');
+  await receipts.write(current.receipt, {
+    relId: '_ns/acme/hello', requireSkillSnapshot: false, skillSourceDir: dest,
+  });
+  await receipts.remove('hello');
+  await receipts.writePendingMutation('hello', {
+    kind: 'relocate', fromRelId: 'hello', toRelId: '_ns/acme/hello',
+  });
+  return { dest, receipts };
 }
 
 describe('GhostManager namespace migration census', () => {
@@ -195,8 +214,7 @@ describe('GhostManager namespace migration census', () => {
     await plantLegacyInstall('acme-tool', false, 'agent-forge');
     const prefixStore = createOrganizationPrefixStore(path.join(workDir, 'organization.v1.json'));
     let receiptUnreadable = true;
-    manager = new GhostManager({
-      getRootDir: () => rootDir,
+    manager = createManager({
       classifyPendingNamespace: (ghostId, marketSyncCompleted = false) => {
         const prefix = prefixStore.lookup('org-acme');
         return classifyNamespaceMigration({
@@ -234,13 +252,12 @@ describe('GhostManager namespace migration census', () => {
 
   it('does not stamp an approval receipt when the market namespace stamp fails', async () => {
     await plantLegacyInstall('hello');
-    manager = new GhostManager({
-      getRootDir: () => rootDir,
+    manager = createManager({
       beforeNamespaceCommit: () => { throw new Error('market namespace conflict'); },
     });
     await expect(manager.commitPendingNamespace('hello', 'acme', 'market-organization'))
       .rejects.toThrow('market namespace conflict');
-    const store = new GhostInstallReceiptStore(() => path.join(workDir, 'ghosts-install-state'));
+    const store = receiptStore();
     const approval = store.read('hello');
     expect(approval.state).toBe('approved');
     if (approval.state === 'approved') expect(approval.receipt.namespace).toBeUndefined();
@@ -251,8 +268,7 @@ describe('GhostManager namespace migration census', () => {
     await plantLegacyInstall('hello');
     const events: string[] = [];
     let runtimeBusy = false;
-    manager = new GhostManager({
-      getRootDir: () => rootDir,
+    manager = createManager({
       classifyPendingNamespace: (_id, synced) => synced
         ? { kind: 'commit', namespace: 'acme', basis: 'market-organization' }
         : { kind: 'pending', reason: 'awaiting-market-facts' },
@@ -284,8 +300,7 @@ describe('GhostManager namespace migration census', () => {
     await plantLegacyInstall('hello');
     const stopped = vi.fn(async () => false);
     const deferred = vi.fn();
-    manager = new GhostManager({
-      getRootDir: () => rootDir,
+    manager = createManager({
       classifyPendingNamespace: () => ({ kind: 'commit', namespace: 'acme', basis: 'market-organization' }),
       isNamespaceMigrationBusy: () => true,
       canResumePendingResidentOffline: () => true,
@@ -315,8 +330,7 @@ describe('GhostManager namespace migration census', () => {
         events.push('stopped');
         return true;
       });
-      manager = new GhostManager({
-        getRootDir: () => rootDir,
+      manager = createManager({
         classifyPendingNamespace: () => ({ kind: 'commit', namespace: 'acme', basis: 'market-organization' }),
         isNamespaceMigrationBusy: () => inFlight || runtimeBusy,
         canResumePendingResidentOffline: () => true,
@@ -348,8 +362,7 @@ describe('GhostManager namespace migration census', () => {
     await plantLegacyInstall('hello');
     const deferred = vi.fn();
     let failStamp = true;
-    manager = new GhostManager({
-      getRootDir: () => rootDir,
+    manager = createManager({
       classifyPendingNamespace: () => ({ kind: 'commit', namespace: 'acme', basis: 'market-organization' }),
       preparePendingResidentForMigration: async () => true,
       onPendingResidentMigrationDeferred: deferred,
@@ -371,8 +384,7 @@ describe('GhostManager namespace migration census', () => {
     let releaseStop: (() => void) | undefined;
     const stopping = new Promise<void>((resolve) => { releaseStop = resolve; });
     const committed = vi.fn();
-    manager = new GhostManager({
-      getRootDir: () => rootDir,
+    manager = createManager({
       getOwnerContextKey: () => owner,
       classifyPendingNamespace: () => ({ kind: 'commit', namespace: 'acme', basis: 'market-organization' }),
       canResumePendingResidentOffline: () => true,
@@ -402,8 +414,7 @@ describe('GhostManager namespace migration census', () => {
     });
     const committed = vi.fn();
     try {
-      manager = new GhostManager({
-        getRootDir: () => rootDir,
+      manager = createManager({
         getOwnerContextKey: () => owner,
         onNamespaceCommitted: committed,
       });
@@ -425,8 +436,7 @@ describe('GhostManager namespace migration census', () => {
     let slugKnown = false;
     let busy = false;
     const stopped = vi.fn(async () => { busy = false; return true; });
-    manager = new GhostManager({
-      getRootDir: () => rootDir,
+    manager = createManager({
       classifyPendingNamespace: () => slugKnown
         ? { kind: 'commit', namespace: 'acme', basis: 'market-organization' }
         : { kind: 'pending', reason: 'awaiting-organization-namespace' },
@@ -448,8 +458,7 @@ describe('GhostManager namespace migration census', () => {
     await plantLegacyInstall('hello');
     let readFails = true;
     let commits = 0;
-    manager = new GhostManager({
-      getRootDir: () => rootDir,
+    manager = createManager({
       classifyPendingNamespace: (ghostId, marketSyncCompleted = false) => classifyNamespaceMigration({
         ghostId,
         builtin: false,
@@ -494,7 +503,7 @@ describe('GhostManager namespace migration census', () => {
   it('recovers an organization install whose approved namespace was erased by a downgraded client', async () => {
     await plantLegacyInstall('hello');
     await manager.commitPendingNamespace('hello', 'acme', 'market-organization');
-    const store = new GhostInstallReceiptStore(() => path.join(workDir, 'ghosts-install-state'));
+    const store = receiptStore();
     const approval = store.read('hello');
     expect(approval.state).toBe('approved');
     if (approval.state !== 'approved') return;
@@ -508,11 +517,8 @@ describe('GhostManager namespace migration census', () => {
       rejection: { code: 'namespace-migration-pending' },
     });
 
-    manager = new GhostManager({
-      getRootDir: () => rootDir,
-      mutateSnapshot: async ({ parentDir, ...request }) => {
-        await runGhostSnapshotWorkerRequest(request, parentDir);
-      },
+    manager = createManager({
+      mutateSnapshot,
       recoverUnstampedOrganizationNamespace: () => 'acme',
       classifyPendingNamespace: () => ({ kind: 'commit', namespace: 'acme', basis: 'market-organization' }),
     });
@@ -528,8 +534,7 @@ describe('GhostManager namespace migration census', () => {
     await fs.promises.mkdir(rootDir, { recursive: true });
     manager.list();
     await plantLegacyInstall('hello');
-    manager = new GhostManager({
-      getRootDir: () => rootDir,
+    manager = createManager({
       recoverUnstampedOrganizationNamespace: () => null,
       classifyPendingNamespace: () => ({ kind: 'commit', namespace: null, basis: 'manual-after-sync' }),
     });
@@ -547,8 +552,7 @@ describe('GhostManager namespace migration census', () => {
     manager.list();
     await plantLegacyInstall('hello');
     const resumed = vi.fn((ghost: InstalledGhost) => ghost.namespaceMigration);
-    manager = new GhostManager({
-      getRootDir: () => rootDir,
+    manager = createManager({
       canResumePendingResidentOffline: () => true,
       onResumePendingResidentOffline: resumed,
     });
@@ -562,11 +566,8 @@ describe('GhostManager namespace migration census', () => {
     manager.list();
     await plantLegacyInstall('hello');
     let failOnce = true;
-    manager = new GhostManager({
-      getRootDir: () => rootDir,
-      mutateSnapshot: async ({ parentDir, ...request }) => {
-        await runGhostSnapshotWorkerRequest(request, parentDir);
-      },
+    manager = createManager({
+      mutateSnapshot,
       recoverUnstampedOrganizationNamespace: () => 'acme',
       classifyPendingNamespace: () => ({ kind: 'commit', namespace: 'acme', basis: 'market-organization' }),
       onNamespaceCommitted: () => {
@@ -585,11 +586,8 @@ describe('GhostManager namespace migration census', () => {
     await plantLegacyInstall('hello');
     manager.list();
     let shouldFail = true;
-    manager = new GhostManager({
-      getRootDir: () => rootDir,
-      mutateSnapshot: async ({ parentDir, ...request }) => {
-        await runGhostSnapshotWorkerRequest(request, parentDir);
-      },
+    manager = createManager({
+      mutateSnapshot,
       onNamespaceCommitted: () => {
         if (shouldFail) throw new Error('market ledger unavailable');
       },
@@ -666,7 +664,7 @@ describe('GhostManager namespace migration census', () => {
 
   it('captures the original receipt when the first census sees an update backup', async () => {
     await plantLegacyInstall('hello');
-    const receipts = new GhostInstallReceiptStore(() => path.join(workDir, 'ghosts-install-state'));
+    const receipts = receiptStore();
     const backupName = '.cindy-updating-hello-deadbeef';
     await receipts.writePendingMutation('hello', {
       kind: 'update',
@@ -700,8 +698,7 @@ describe('GhostManager namespace migration census', () => {
       source: 'market', installed: true, updatedAt: '2026-09-30T00:00:00.000Z',
     });
     let busy = true;
-    manager = new GhostManager({
-      getRootDir: () => rootDir,
+    manager = createManager({
       isNamespaceMigrationBusy: () => busy,
       classifyPendingNamespace: (ghostId) => classifyNamespaceMigration({
         ghostId, builtin: false, installOrigin: 'manual', marketSyncCompleted: true,
@@ -711,9 +708,7 @@ describe('GhostManager namespace migration census', () => {
       beforeNamespaceCommit: (ghostId, namespace) => {
         if (!marketLedger.stampNamespaceIfAbsent(ghostId, namespace)) throw new Error('stamp failed');
       },
-      mutateSnapshot: async ({ parentDir, ...request }) => {
-        await runGhostSnapshotWorkerRequest(request, parentDir);
-      },
+      mutateSnapshot,
     });
     manager.list();
     await manager.reconcilePendingRootNamespaces(true);
@@ -736,8 +731,7 @@ describe('GhostManager namespace migration census', () => {
   it('keeps an already ambiguous multi-record pending install blocked without stamping either row', async () => {
     await plantLegacyInstall('hello');
     const beforeCommit = vi.fn();
-    manager = new GhostManager({
-      getRootDir: () => rootDir,
+    manager = createManager({
       classifyPendingNamespace: (ghostId) => classifyNamespaceMigration({
         ghostId, builtin: false, installOrigin: 'manual', marketSyncCompleted: true,
         marketRecord: readNamespaceMigrationMarketRecord(() => [
@@ -788,27 +782,24 @@ describe('GhostManager namespace migration census', () => {
     });
     expect(ghost?.namespaceMigration).toBeUndefined();
     expect(fs.existsSync(path.join(rootDir, '_ns', 'xd', 'xd-feishu'))).toBe(false);
-    const { installedGhostStoragePart, installedGhostRuntimeId } = await import('../../../shared/pluginIdentity.js');
+    const { installedGhostStoragePart } = await import('../../../shared/pluginIdentity.js');
     expect(installedGhostStoragePart(ghost!)).toBe('xd-feishu');
-    expect(installedGhostRuntimeId(ghost!)).toBe('xd-feishu');
   });
 
   it('finishes a receipt-first commit by removing the pending entry after a restart', async () => {
     await plantLegacyInstall('hello');
     expect(manager.ensureNamespaceMigrationCensus()?.entries.hello?.status).toBe('pending');
     const stateRoot = path.join(workDir, 'ghosts-install-state');
-    const receipts = new GhostInstallReceiptStore(() => stateRoot, async ({ parentDir, ...request }) => {
-      await runGhostSnapshotWorkerRequest(request, parentDir);
-    });
+    const receipts = receiptStore(mutateSnapshot);
     const approval = receipts.read('hello');
     if (approval.state !== 'approved') throw new Error('expected approved receipt');
     await receipts.write({ ...approval.receipt, namespace: 'xd' }, {
       relId: 'hello', skillSourceDir: path.join(rootDir, 'hello'), requireSkillSnapshot: false,
     });
-    manager = new GhostManager({ getRootDir: () => rootDir, getStateDir: () => stateRoot });
+    manager = createManager({ getStateDir: () => stateRoot });
     await expect(manager.commitPendingNamespace('hello', null, 'market-public')).resolves.toEqual({ ok: true });
     expect(manager.ensureNamespaceMigrationCensus()?.entries).toEqual({});
-    manager = new GhostManager({ getRootDir: () => rootDir, getStateDir: () => stateRoot });
+    manager = createManager({ getStateDir: () => stateRoot });
     expect(manager.list()[0]).toMatchObject({ namespace: 'xd', dir: path.join(rootDir, 'hello') });
     expect(manager.list()[0]?.namespaceMigration).toBeUndefined();
   });
@@ -831,15 +822,10 @@ describe('GhostManager namespace migration census', () => {
   });
 
   it('lets a root plugin occupy the original directory after an in-place namespaced stamp', async () => {
-    await plantLegacyInstall('hello');
-    manager.list();
-    await manager.commitPendingNamespace('hello', 'acme', 'market-organization');
+    await stampLegacyOrganizationInstall();
     const committed: string[] = [];
-    manager = new GhostManager({
-      getRootDir: () => rootDir,
-      mutateSnapshot: async ({ parentDir, ...request }) => {
-        await runGhostSnapshotWorkerRequest(request, parentDir);
-      },
+    manager = createManager({
+      mutateSnapshot,
       onPhysicalRelocated: async () => undefined,
       onPhysicalRelocateCommitted: (toRelId) => {
         committed.push(toRelId);
@@ -863,15 +849,10 @@ describe('GhostManager namespace migration census', () => {
   });
 
   it('retains the relocation journal until interrupted user-data moves succeed', async () => {
-    await plantLegacyInstall('hello');
-    manager.list();
-    await manager.commitPendingNamespace('hello', 'acme', 'market-organization');
+    await stampLegacyOrganizationInstall();
     let calls = 0;
-    manager = new GhostManager({
-      getRootDir: () => rootDir,
-      mutateSnapshot: async ({ parentDir, ...request }) => {
-        await runGhostSnapshotWorkerRequest(request, parentDir);
-      },
+    manager = createManager({
+      mutateSnapshot,
       onPhysicalRelocated: async () => {
         calls += 1;
         if (calls === 1) throw new Error('data move interrupted');
@@ -881,10 +862,7 @@ describe('GhostManager namespace migration census', () => {
     await expect(manager.install(rootCindy)).resolves.toMatchObject({
       rejection: { code: 'io' },
     });
-    const receipts = new GhostInstallReceiptStore(
-      () => path.join(workDir, 'ghosts-install-state'),
-      async () => undefined,
-    );
+    const receipts = receiptStore(async () => undefined);
     expect(calls).toBe(1);
     expect(receipts.readPendingMutationSync('hello').state).toBe('valid');
     expect(fs.existsSync(path.join(rootDir, 'hello', 'ghost.json'))).toBe(false);
@@ -892,11 +870,8 @@ describe('GhostManager namespace migration census', () => {
     expect(manager.list().some((ghost) => ghost.approval.state === 'approved')).toBe(false);
     await expect(manager.install(rootCindy)).resolves.toMatchObject({ rejection: { code: 'io' } });
     expect(receipts.readPendingMutationSync('hello').state).toBe('valid');
-    manager = new GhostManager({
-      getRootDir: () => rootDir,
-      mutateSnapshot: async ({ parentDir, ...request }) => {
-        await runGhostSnapshotWorkerRequest(request, parentDir);
-      },
+    manager = createManager({
+      mutateSnapshot,
       onPhysicalRelocated: async () => { calls += 1; },
     });
     await expect.poll(() => receipts.readPendingMutationSync('hello').state).toBe('missing');
@@ -904,106 +879,93 @@ describe('GhostManager namespace migration census', () => {
     expect(manager.list()).toEqual([expect.objectContaining({ namespace: 'acme' })]);
   });
 
-  it('retries user-data relocate when content already moved', async () => {
-    await plantLegacyInstall('hello');
-    manager.list();
-    await manager.commitPendingNamespace('hello', 'acme', 'market-organization');
-    const dest = path.join(rootDir, '_ns', 'acme', 'hello');
-    await fs.promises.mkdir(path.dirname(dest), { recursive: true });
-    await fs.promises.rename(path.join(rootDir, 'hello'), dest);
-    const receipts = new GhostInstallReceiptStore(
-      () => path.join(workDir, 'ghosts-install-state'),
-      async ({ parentDir, ...request }) => {
-        await runGhostSnapshotWorkerRequest(request, parentDir);
-      },
-    );
-    const current = receipts.read('hello');
-    expect(current.state).toBe('approved');
-    if (current.state !== 'approved') return;
-    await receipts.write(current.receipt, {
-      relId: '_ns/acme/hello',
-      requireSkillSnapshot: false,
-      skillSourceDir: dest,
-    });
-    await receipts.remove('hello');
-    await receipts.writePendingMutation('hello', {
-      kind: 'relocate',
-      fromRelId: 'hello',
-      toRelId: '_ns/acme/hello',
-    });
-    let calls = 0;
-    manager = new GhostManager({
-      getRootDir: () => rootDir,
-      mutateSnapshot: async ({ parentDir, ...request }) => {
-        await runGhostSnapshotWorkerRequest(request, parentDir);
-      },
-      onPhysicalRelocated: async () => {
-        calls += 1;
-      },
-    });
-    await expect.poll(() => receipts.readPendingMutationSync('hello').state).toBe('missing');
-    expect(calls).toBe(1);
-    expect(manager.list()).toEqual([
-      expect.objectContaining({ namespace: 'acme', dir: dest }),
-    ]);
-  });
-
-  it('retries a failed startup relocation after the database becomes ready', async () => {
-    await plantLegacyInstall('hello');
-    manager.list();
-    await manager.commitPendingNamespace('hello', 'acme', 'market-organization');
-    const dest = path.join(rootDir, '_ns', 'acme', 'hello');
-    await fs.promises.mkdir(path.dirname(dest), { recursive: true });
-    await fs.promises.rename(path.join(rootDir, 'hello'), dest);
-    const receipts = new GhostInstallReceiptStore(
-      () => path.join(workDir, 'ghosts-install-state'),
-      async ({ parentDir, ...request }) => {
-        await runGhostSnapshotWorkerRequest(request, parentDir);
-      },
-    );
-    const current = receipts.read('hello');
-    expect(current.state).toBe('approved');
-    if (current.state !== 'approved') return;
-    await receipts.write(current.receipt, {
-      relId: '_ns/acme/hello',
-      requireSkillSnapshot: false,
-      skillSourceDir: dest,
-    });
-    await receipts.remove('hello');
-    await receipts.writePendingMutation('hello', {
-      kind: 'relocate', fromRelId: 'hello', toRelId: '_ns/acme/hello',
-    });
-    let ready = false;
+  it.each([
+    ['retries user-data relocate when content already moved', false],
+    ['retries a failed startup relocation after the database becomes ready', true],
+  ] as const)('%s', async (_name, startsBeforeDbReady) => {
+    const { dest, receipts } = await plantInterruptedRelocation();
+    let ready = !startsBeforeDbReady;
     let attempts = 0;
-    manager = new GhostManager({
-      getRootDir: () => rootDir,
-      mutateSnapshot: async ({ parentDir, ...request }) => {
-        await runGhostSnapshotWorkerRequest(request, parentDir);
-      },
+    manager = createManager({
+      mutateSnapshot,
       onPhysicalRelocated: async () => {
         attempts += 1;
         if (!ready) throw new Error('DbClient not ready');
       },
     });
-    await expect.poll(() => attempts).toBe(1);
-    expect(receipts.readPendingMutationSync('hello').state).toBe('valid');
-    ready = true;
-    await manager.retryInterruptedMutationsAfterDbReady();
-    expect(attempts).toBe(2);
-    expect(receipts.readPendingMutationSync('hello').state).toBe('missing');
+    if (startsBeforeDbReady) {
+      await expect.poll(() => attempts).toBe(1);
+      expect(receipts.readPendingMutationSync('hello').state).toBe('valid');
+      ready = true;
+      await manager.retryInterruptedMutationsAfterDbReady();
+      expect(attempts).toBe(2);
+      expect(receipts.readPendingMutationSync('hello').state).toBe('missing');
+    } else {
+      await expect.poll(() => receipts.readPendingMutationSync('hello').state).toBe('missing');
+      expect(attempts).toBe(1);
+    }
     expect(manager.list()).toEqual([expect.objectContaining({ namespace: 'acme', dir: dest })]);
   });
 
+  it('serializes interrupted relocation recovery before uninstalling and reinstalling its destination', async () => {
+    const { dest, receipts } = await plantInterruptedRelocation();
+    let finish!: () => void;
+    let started!: () => void;
+    const ready = new Promise<void>((resolve) => { started = resolve; });
+    const gate = new Promise<void>((resolve) => { finish = resolve; });
+    manager = createManager({ mutateSnapshot, onPhysicalRelocated: async () => { started(); await gate; } });
+    await ready;
+    let uninstalled = false;
+    const replacement = manager.uninstall('_ns/acme/hello').then(async () => {
+      uninstalled = true;
+      return manager.install(await makeCindy('hello'), { namespace: 'acme' });
+    });
+    await new Promise<void>((resolve) => setTimeout(resolve, 30));
+    const overlapped = uninstalled;
+    finish();
+    await replacement;
+    await manager.retryInterruptedMutationsAfterDbReady();
+    expect(overlapped).toBe(false);
+    expect(receipts.readPendingMutationSync('hello').state).toBe('missing');
+    expect(manager.list()).toEqual([expect.objectContaining({ dir: dest, approval: expect.objectContaining({ state: 'approved' }) })]);
+  });
+
+  it.each(['receipt', 'journal'] as const)('does not commit interrupted relocation after its %s is superseded', async (changed) => {
+    const { dest, receipts } = await plantInterruptedRelocation();
+    let finish!: () => void;
+    let started!: () => void;
+    const ready = new Promise<void>((resolve) => { started = resolve; });
+    const gate = new Promise<void>((resolve) => { finish = resolve; });
+    const warn = vi.fn();
+    const committed = vi.fn();
+    manager = createManager({
+      mutateSnapshot, onPhysicalRelocated: async () => { started(); await gate; },
+      onPhysicalRelocateCommitted: committed, log: { info: vi.fn(), warn },
+    });
+    await ready;
+    if (changed === 'receipt') {
+      const approval = receipts.readForRecovery('_ns/acme/hello');
+      if (approval.state !== 'approved') throw new Error('expected destination approval');
+      await receipts.write({ ...approval.receipt, revision: '22222222-2222-4222-8222-222222222222' }, {
+        relId: '_ns/acme/hello', requireSkillSnapshot: false, skillSourceDir: dest,
+      });
+    } else {
+      await receipts.writePendingMutation('hello', { kind: 'relocate', fromRelId: 'hello', toRelId: '_ns/acme/other' });
+    }
+    const expectedApproval = receipts.readForRecovery('_ns/acme/hello');
+    const expectedMarker = receipts.readPendingMutationSync('hello');
+    finish();
+    await vi.waitFor(() => expect(warn).toHaveBeenCalledWith('ghost relocate recovery side effect failed', expect.anything()));
+    expect(committed).not.toHaveBeenCalled();
+    expect(receipts.readPendingMutationSync('hello')).toEqual(expectedMarker);
+    expect(receipts.readForRecovery('_ns/acme/hello')).toEqual(expectedApproval);
+  });
+
   it('stops the physical instance before renaming it out of the way', async () => {
-    await plantLegacyInstall('hello');
-    manager.list();
-    await manager.commitPendingNamespace('hello', 'acme', 'market-organization');
+    await stampLegacyOrganizationInstall();
     const seen: string[] = [];
-    manager = new GhostManager({
-      getRootDir: () => rootDir,
-      mutateSnapshot: async ({ parentDir, ...request }) => {
-        await runGhostSnapshotWorkerRequest(request, parentDir);
-      },
+    manager = createManager({
+      mutateSnapshot,
       onBeforePhysicalRelocate: (fromRelId) => {
         seen.push(fromRelId);
         expect(fs.existsSync(path.join(rootDir, 'hello', 'ghost.json'))).toBe(true);
@@ -1019,38 +981,28 @@ describe('GhostManager namespace migration census', () => {
   });
 
   it('leaves the approved occupant usable when preflight finds conflicting user data', async () => {
-    await plantLegacyInstall('hello');
-    manager.list();
-    await manager.commitPendingNamespace('hello', 'acme', 'market-organization');
-    manager = new GhostManager({
-      getRootDir: () => rootDir,
-      mutateSnapshot: async ({ parentDir, ...request }) => {
-        await runGhostSnapshotWorkerRequest(request, parentDir);
-      },
+    await stampLegacyOrganizationInstall();
+    manager = createManager({
+      mutateSnapshot,
       onValidatePhysicalRelocation: () => { throw new Error('relocate destination already exists'); },
     });
     const rootCindy = await makeCindy('hello');
     await expect(manager.install(rootCindy)).resolves.toMatchObject({ rejection: { code: 'io' } });
     expect(fs.existsSync(path.join(rootDir, 'hello', 'ghost.json'))).toBe(true);
     expect(manager.list()).toEqual([expect.objectContaining({ approval: expect.objectContaining({ state: 'approved' }) })]);
-    const receipts = new GhostInstallReceiptStore(
-      () => path.join(workDir, 'ghosts-install-state'),
-      async () => undefined,
-    );
+    const receipts = receiptStore(async () => undefined);
     expect(receipts.readPendingMutationSync('hello').state).toBe('missing');
   });
 
   it('installs and verifies a namespaced skill snapshot under its physical identity', async () => {
-    const zip = new JSZip();
-    zip.file('ghost.json', JSON.stringify({
+    const filePath = await writeTestCindyPackage(path.join(workDir, 'helper-skill.cindy'), {
       ...manifest('helper'),
       slots: ['tool', 'skill'],
       skill: { items: [{ dir: 'skills/demo', name: 'demo', description: 'Demo skill' }] },
-    }));
-    zip.file('main.js', '// ok\n');
-    zip.file('skills/demo/SKILL.md', '---\nname: demo\ndescription: Demo skill\n---\n\nDemo\n');
-    const filePath = path.join(workDir, 'helper-skill.cindy');
-    await fs.promises.writeFile(filePath, await zip.generateAsync({ type: 'nodebuffer' }));
+    }, {
+      'main.js': '// ok\n',
+      'skills/demo/SKILL.md': '---\nname: demo\ndescription: Demo skill\n---\n\nDemo\n',
+    });
     const result = await manager.install(filePath, { namespace: 'acme' });
     expect(result).toMatchObject({ ghost: { manifest: { id: 'helper' } } });
     if (!('ghost' in result)) return;
@@ -1059,9 +1011,7 @@ describe('GhostManager namespace migration census', () => {
   });
 
   it('keeps a stamped skill approved after vacating for a same-name root install', async () => {
-    await plantLegacyInstall('hello', true);
-    manager.list();
-    await manager.commitPendingNamespace('hello', 'acme', 'market-organization');
+    await stampLegacyOrganizationInstall('hello', true);
     const rootCindy = await makeCindy('hello');
     await expect(manager.install(rootCindy)).resolves.toMatchObject({ ghost: { manifest: { id: 'hello' } } });
     const org = manager.list().find((ghost) => ghost.namespace === 'acme');
@@ -1070,9 +1020,7 @@ describe('GhostManager namespace migration census', () => {
   });
 
   it('treats a later install of the same organization identity as already installed', async () => {
-    await plantLegacyInstall('hello');
-    manager.list();
-    await manager.commitPendingNamespace('hello', 'acme', 'market-organization');
+    await stampLegacyOrganizationInstall();
     const orgCindy = await makeCindy('hello');
     await expect(manager.install(orgCindy, { namespace: 'acme' })).resolves.toMatchObject({
       rejection: { code: 'already-installed' },
@@ -1111,13 +1059,9 @@ describe('GhostManager namespace migration census', () => {
 
   it('skips the first namespace stamp while the plugin is busy', async () => {
     await plantLegacyInstall('hello');
-    const busyManager = new GhostManager({
-      getRootDir: () => rootDir,
+    const busyManager = createManager({
       isNamespaceMigrationBusy: () => true,
-      mutateSnapshot: async (request) => {
-        const { parentDir, ...workerRequest } = request;
-        await runGhostSnapshotWorkerRequest(workerRequest, parentDir);
-      },
+      mutateSnapshot,
     });
     busyManager.list();
     await expect(busyManager.commitPendingNamespace('hello', null, 'builtin')).resolves.toEqual({

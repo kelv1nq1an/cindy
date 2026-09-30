@@ -711,6 +711,7 @@ function isTerminalPublisherClientError(error: PluginPublisherApiError): boolean
 }
 
 function mapPublisherApiMessage(error: PluginPublisherApiError): string {
+  if (error.code === 'PLUGIN_NAMESPACE_CLIENT_REQUIRED') return '请更新 Cindy 后再发布此组织的插件';
   if (error.status === 403 && error.code === 'FORBIDDEN') {
     return '本企业未开启成员发布，请联系管理员';
   }

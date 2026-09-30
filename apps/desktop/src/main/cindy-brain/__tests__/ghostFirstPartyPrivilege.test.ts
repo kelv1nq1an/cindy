@@ -66,6 +66,20 @@ function market(
 }
 
 describe('resolveGhostFirstPartyPrivilege', () => {
+  it.each(['xd', null])('retains the trusted Mivo alias with an old token and namespace %s', (namespace) => {
+    const trusted = facts({ ghostId: 'xd-mivo', namespace,
+      currentOrganization: { organizationId: 'org-xd', orgSlug: null, pluginPrefix: 'xd' },
+      marketRecord: market({ scope: 'organization', organizationId: 'org-xd' }),
+    });
+    expect(isTrustedMivoSecretAlias(trusted, namespace === null)).toBe(true);
+    expect(isTrustedMivoSecretAlias({ ...trusted,
+      currentOrganization: { organizationId: 'org-xd', orgSlug: 'other', pluginPrefix: 'xd' },
+    }, namespace === null)).toBe(false);
+    expect(isTrustedMivoSecretAlias({ ...trusted,
+      marketRecord: market({ scope: 'organization', organizationId: 'org-other' }),
+    }, namespace === null)).toBe(false);
+  });
+
   it('binds the Mivo historical key to a real XD installation, not the plugin name', () => {
     const xdOrganization = { organizationId: 'org-xd', orgSlug: 'xd', pluginPrefix: 'xd' };
     const trusted = facts({
