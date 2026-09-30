@@ -136,6 +136,7 @@ import { PluginScopePicker, usePluginRecentWorkdirs } from './PluginScopePicker'
 import {
   canOfferMarketInstall,
   ghostReapprovalRoute,
+  marketItemForInstalledGhost,
   marketItemMatchesInstalledGhost,
   marketReviewTargetsInstalledGhost,
   pluginPresentationOrigin,
@@ -153,17 +154,6 @@ import './plugin-motion.css';
 const PLUGIN_CATALOG_TOOLBAR_CLASS =
   'plugin-catalog-toolbar mb-5 flex items-center justify-between gap-4';
 type PluginPresentationFilter = 'all' | PluginPresentationOrigin;
-
-function marketItemForInstalledGhost(
-  items: readonly PluginMarketItem[],
-  ghost: InstalledGhost,
-): PluginMarketItem | null {
-  return (
-    items.find(
-      (item) => item.installState !== 'conflict' && marketItemMatchesInstalledGhost(item, ghost),
-    ) ?? null
-  );
-}
 
 type PresentedGhostPluginItem = GhostPluginListItem & {
   origin: PluginPresentationOrigin;

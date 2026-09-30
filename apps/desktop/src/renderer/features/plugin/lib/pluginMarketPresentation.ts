@@ -117,8 +117,17 @@ export function marketItemMatchesInstalledGhost(
   if (hasDeliveryNamespace(item) && hasDeliveryNamespace(ghost)) {
     return item.namespace === ghost.namespace;
   }
-  if (hasDeliveryNamespace(item) && item.namespace !== null) return true;
+  if (hasDeliveryNamespace(item) && item.namespace !== null) return false;
   return installedGhostStoragePart(ghost) === item.ghostId;
+}
+
+export function marketItemForInstalledGhost(
+  items: readonly PluginMarketItem[],
+  ghost: { manifest: { id: string }; dir?: string; namespace?: string | null },
+): PluginMarketItem | null {
+  return items.find((item) =>
+    (item.installState === 'installed' || item.installState === 'update-available') &&
+    marketItemMatchesInstalledGhost(item, ghost)) ?? null;
 }
 
 function installedItemForMarketItem<TInstalled extends { id: string; ghostId?: string }>(

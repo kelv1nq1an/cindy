@@ -5,6 +5,7 @@ import {
   ghostReapprovalRoute,
   marketReviewTargetsInstalledGhost,
   findInstalledGhostForMarketItem,
+  marketItemForInstalledGhost,
   marketItemMatchesInstalledGhost,
   orderPluginCatalogItems,
   pluginPresentationOrigin,
@@ -289,7 +290,7 @@ describe('marketItemMatchesInstalledGhost', () => {
     ).toBe(true);
   });
 
-  it('binds a legacy root market row to the physical root when an enterprise twin exists', () => {
+  it('binds a legacy root market row to the physical root without attributing unstamped installs to an enterprise', () => {
     const root = { manifest: { id: 'helper' }, namespace: null, dir: '/ghosts/helper' };
     const enterprise = {
       manifest: { id: 'helper' },
@@ -307,7 +308,44 @@ describe('marketItemMatchesInstalledGhost', () => {
         { ghostId: 'helper', namespace: 'xd' },
         { manifest: { id: 'helper' }, dir: '/ghosts/helper' },
       ),
-    ).toBe(true);
+    ).toBe(false);
+  });
+});
+
+describe('marketItemForInstalledGhost', () => {
+  const pending = { manifest: { id: 'helper' }, dir: '/ghosts/helper' };
+  const stampedInPlace = { ...pending, namespace: 'xd' };
+
+  it('keeps a pending legacy install local when a same-name organization market item is not installed', () => {
+    const organization = { ...marketItem('organization', 'helper', 'not-installed'),
+      scope: 'organization' as const, namespace: 'xd' };
+    expect(marketItemForInstalledGhost([organization], pending)).toBeNull();
+    expect(pluginPresentationOrigin(marketItemForInstalledGhost([organization], pending))).toBe('local');
+  });
+
+  it('does not let an uninstalled organization listing shadow a verified root route', () => {
+    const organization = { ...marketItem('organization', 'helper', 'not-installed'),
+      scope: 'organization' as const, namespace: 'xd' };
+    const root = { ...marketItem('root', 'helper', 'installed'), namespace: null };
+    expect(marketItemForInstalledGhost([organization, root], pending)).toBe(root);
+    expect(pluginPresentationOrigin(marketItemForInstalledGhost([organization, root], pending))).toBe('public');
+  });
+
+  it('does not use an unverified root route even when it points to the same directory', () => {
+    const root = marketItem('root', 'helper', 'not-installed');
+    expect(marketItemForInstalledGhost([root], pending)).toBeNull();
+  });
+
+  it('keeps a verified legacy market route for an in-place stamped organization plugin', () => {
+    const legacy = marketItem('legacy', 'helper', 'update-available');
+    expect(marketItemForInstalledGhost([legacy], stampedInPlace)).toBe(legacy);
+  });
+
+  it('requires logical identity for a known-namespace installed route', () => {
+    const organization = { ...marketItem('organization', 'helper', 'installed'),
+      scope: 'organization' as const, namespace: 'xd' };
+    expect(marketItemForInstalledGhost([organization], pending)).toBeNull();
+    expect(marketItemForInstalledGhost([organization], stampedInPlace)).toBe(organization);
   });
 });
 
