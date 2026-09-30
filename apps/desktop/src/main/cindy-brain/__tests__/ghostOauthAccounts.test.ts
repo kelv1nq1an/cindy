@@ -786,6 +786,184 @@ describe('missingAuthScopes(快照推断)', () => {
 });
 
 describe('connectAccount', () => {
+  it.each([
+    ['same declaration on a replacement root instance', 'token'],
+    ['physical relocation during identity lookup', 'identity'],
+    ['approval replacement before the mutation lock', 'mutation'],
+    ['owner invalidation before the mutation lock', 'owner'],
+  ] as const)('rejects %s without committing tokens', async (_name, transition) => {
+    const ghostId = 'helper';
+    const vault = memoryVault();
+    const originalTarget = { ownerGeneration: 1, revision: 'approved-org', storagePart: ghostId };
+    let currentTarget: typeof originalTarget | null = originalTarget;
+    let insideMutationLock = false;
+    const captureConnectTarget = vi.fn(() => currentTarget);
+    const isConnectTargetCurrent = vi.fn((
+      _ghostId: string, _secretKey: string, _decl: GhostOauthDecl, expected?: unknown,
+    ) => expected === undefined || expected === currentTarget);
+    const decl = { ...DECL, clientId: 'fake-public-client' };
+    const deps = {
+      vault,
+      captureConnectTarget,
+      isConnectTargetCurrent,
+      openExternal: autoBrowser(),
+      fetchImpl: (async (input) => {
+        if (String(input) === decl.tokenUrl) {
+          if (transition === 'token') {
+            currentTarget = { ownerGeneration: 1, revision: 'approved-root', storagePart: ghostId };
+          }
+          return jsonResponse({ access_token: 'fake-org-access', refresh_token: 'fake-org-refresh', expires_in: 3600 });
+        }
+        if (transition === 'identity') {
+          currentTarget = { ownerGeneration: 1, revision: 'approved-org', storagePart: '_ns__acme__helper' };
+        }
+        return jsonResponse({ email: 'org@example.com' });
+      }) as typeof fetch,
+      withMutationLock: async <Result>(_ghostId: string, task: () => Promise<Result> | Result) => {
+        insideMutationLock = true;
+        if (transition === 'mutation') {
+          currentTarget = { ownerGeneration: 1, revision: 'approved-new', storagePart: ghostId };
+        }
+        if (transition === 'owner') currentTarget = null;
+        return task();
+      },
+    };
+    const manager = new GhostOauthAccountManager(deps);
+
+    await expect(manager.connectAccount(ghostId, KEY, decl)).resolves.toMatchObject({
+      ok: false, error: 'INVALID_CONFIG',
+    });
+    expect(captureConnectTarget).toHaveBeenCalledExactlyOnceWith(ghostId);
+    expect(isConnectTargetCurrent).toHaveBeenLastCalledWith(ghostId, KEY, decl, originalTarget);
+    expect(insideMutationLock).toBe(transition !== 'token');
+    expect(vault.data.size).toBe(0);
+    expect(manager.listAccounts(ghostId, KEY)).toHaveLength(0);
+    await expect(manager.getFreshAccessToken(ghostId, KEY, decl)).resolves.toMatchObject({
+      ok: false, error: 'NO_ACCOUNT',
+    });
+  });
+
+  it.each([
+    { revision: 'legacy-approval', storagePart: 'helper' },
+    { namespace: null, revision: 'root-approval', storagePart: 'helper' },
+    { namespace: 'acme', revision: 'in-place-approval', storagePart: 'helper' },
+    { namespace: 'acme', revision: 'relocated-approval', storagePart: '_ns__acme__helper' },
+  ])('keeps an unchanged approved target usable: $revision', async (target) => {
+    const vault = memoryVault();
+    let insideMutationLock = false;
+    const captureConnectTarget = vi.fn(() => target);
+    const isConnectTargetCurrent = vi.fn((
+      _ghostId: string, _secretKey: string, _decl: GhostOauthDecl, expected?: unknown,
+    ) => expected === undefined || expected === target);
+    const decl = { ...DECL, clientId: 'fake-public-client' };
+    const fetchImpl = vi.fn(async (input: string | URL | Request) => String(input) === decl.tokenUrl
+      ? jsonResponse({ access_token: 'fake-access', refresh_token: 'fake-refresh', expires_in: 3600 })
+      : jsonResponse({ email: 'test@example.com' }));
+    const deps = {
+      vault, captureConnectTarget, isConnectTargetCurrent, fetchImpl: fetchImpl as typeof fetch,
+      openExternal: autoBrowser(),
+      withMutationLock: async <Result>(_ghostId: string, task: () => Promise<Result> | Result) => {
+        insideMutationLock = true;
+        return task();
+      },
+    };
+    const manager = new GhostOauthAccountManager(deps);
+    const result = await manager.connectAccount(target.storagePart, KEY, decl);
+
+    expect(result.ok).toBe(true);
+    expect(captureConnectTarget).toHaveBeenCalledExactlyOnceWith(target.storagePart);
+    expect(isConnectTargetCurrent).toHaveBeenLastCalledWith(target.storagePart, KEY, decl, target);
+    expect(insideMutationLock).toBe(true);
+    expect(manager.listAccounts(target.storagePart, KEY)).toHaveLength(1);
+    if (!result.ok) throw new Error('Expected the unchanged target to connect');
+    expect(vault.read(target.storagePart, KEY + '-rt-' + result.account.id)).toBe('fake-refresh');
+    const fetchCount = fetchImpl.mock.calls.length;
+    await expect(manager.getFreshAccessToken(target.storagePart, KEY, decl)).resolves.toMatchObject({
+      ok: true, accessToken: 'fake-access',
+    });
+    expect(fetchImpl).toHaveBeenCalledTimes(fetchCount);
+  });
+
+  it.each([null, undefined])('refuses an unavailable captured target (%s) before authorization', async (target) => {
+    const vault = memoryVault();
+    const openExternal = vi.fn(autoBrowser());
+    const fetchImpl = vi.fn(async (input: string | URL | Request) => String(input) === DECL.tokenUrl
+      ? jsonResponse({ access_token: 'fake-access', refresh_token: 'fake-refresh', expires_in: 3600 })
+      : jsonResponse({ email: 'test@example.com' }));
+    const deps = {
+      vault, openExternal, fetchImpl: fetchImpl as typeof fetch,
+      captureConnectTarget: () => target,
+      isConnectTargetCurrent: () => true,
+    };
+    const manager = new GhostOauthAccountManager(deps);
+    await expect(manager.connectAccount('helper', KEY, { ...DECL, clientId: 'fake-client' })).resolves.toMatchObject({
+      ok: false, error: 'INVALID_CONFIG',
+    });
+    expect(openExternal).not.toHaveBeenCalled();
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(vault.data.size).toBe(0);
+  });
+
+  it('does not recapture a replacement instance when the endpoint provides its original target', async () => {
+    const originalTarget = { revision: 'approved-org', storagePart: 'helper' };
+    const replacementTarget = { revision: 'approved-root', storagePart: 'helper' };
+    const captureConnectTarget = vi.fn(() => replacementTarget);
+    const openExternal = vi.fn();
+    const vault = memoryVault();
+    const deps = {
+      vault, captureConnectTarget, openExternal,
+      fetchImpl: vi.fn() as unknown as typeof fetch,
+      isConnectTargetCurrent: (
+        _ghostId: string, _secretKey: string, _decl: GhostOauthDecl, expected?: unknown,
+      ) => expected === replacementTarget,
+    };
+    const manager = new GhostOauthAccountManager(deps);
+    await expect(manager.connectAccount('helper', KEY, { ...DECL, clientId: 'fake-client' }, {
+      expectedConnectTarget: originalTarget,
+    })).resolves.toMatchObject({ ok: false, error: 'INVALID_CONFIG' });
+    expect(captureConnectTarget).not.toHaveBeenCalled();
+    expect(openExternal).not.toHaveBeenCalled();
+    expect(vault.data.size).toBe(0);
+  });
+
+  it('fails closed when a captured target has no lifecycle verifier', async () => {
+    const vault = memoryVault();
+    const openExternal = vi.fn();
+    const deps = {
+      vault, openExternal,
+      fetchImpl: vi.fn() as unknown as typeof fetch,
+      captureConnectTarget: () => ({ revision: 'approved-org' }),
+    };
+    const manager = new GhostOauthAccountManager(deps);
+    await expect(manager.connectAccount('helper', KEY, { ...DECL, clientId: 'fake-client' })).resolves.toMatchObject({
+      ok: false, error: 'INVALID_CONFIG',
+    });
+    expect(openExternal).not.toHaveBeenCalled();
+    expect(vault.data.size).toBe(0);
+  });
+
+  it('keeps refresh token comparison independent of connect target capture', async () => {
+    const vault = seededVault();
+    const captureConnectTarget = vi.fn(() => null);
+    const isConnectTargetCurrent = vi.fn(() => true);
+    const fetchImpl = vi.fn(async () => {
+      vault.remove(GHOST, KEY + '-rt-acc-1');
+      return jsonResponse({ access_token: 'fake-stale-access', refresh_token: 'fake-stale-refresh', expires_in: 3600 });
+    });
+    const deps = {
+      vault, captureConnectTarget, isConnectTargetCurrent,
+      openExternal: vi.fn(), fetchImpl: fetchImpl as unknown as typeof fetch,
+    };
+    const manager = new GhostOauthAccountManager(deps);
+    await expect(manager.getFreshAccessToken(GHOST, KEY, DECL)).resolves.toMatchObject({
+      ok: false, error: 'AUTH_EXPIRED',
+    });
+    expect(captureConnectTarget).not.toHaveBeenCalled();
+    expect(isConnectTargetCurrent).toHaveBeenCalledWith(GHOST, KEY, DECL);
+    expect(vault.read(GHOST, KEY + '-rt-acc-1')).toBeNull();
+    expect([...vault.data.values()]).not.toContain('fake-stale-refresh');
+  });
+
   it.each(['boundary', 'policy'] as const)('does not commit OAuth tokens when %s becomes invalid during identity lookup', async (reason) => {
     const vault = memoryVault({ [`${KEY}-client-id`]: 'cid' });
     const before = new Map(vault.data);
@@ -1290,6 +1468,154 @@ describe('connectAccount', () => {
     expect(result).toMatchObject({ ok: true });
     if (result.ok) expect(result.account.id).toBe('acc-3');
     expect(mgr.listAccounts(GHOST, KEY)).toHaveLength(GHOST_OAUTH_MAX_ACCOUNTS);
+  });
+});
+
+describe('invalidateGhost', () => {
+  it.each(['success', 'invalid-grant', 'missing-token'] as const)('blocks stale %s mutations after waiting for the OAuth lock', async (outcome) => {
+    const vault = seededVault('fake-same-refresh');
+    if (outcome === 'missing-token') vault.remove(GHOST, KEY + '-rt-acc-1');
+    const before = new Map(vault.data);
+    const manager: GhostOauthAccountManager = new GhostOauthAccountManager({
+      vault, openExternal: vi.fn(), sleep: instantSleep,
+      fetchImpl: vi.fn(async () => outcome === 'success'
+        ? jsonResponse({ access_token: 'fake-stale-access', refresh_token: 'fake-stale-rotated', expires_in: 3600 })
+        : jsonResponse({ error: 'invalid_grant' }, 400)) as unknown as typeof fetch,
+      withMutationLock: async (_ghostId, task) => {
+        manager.invalidateGhost(GHOST);
+        return task();
+      },
+    });
+    await expect(manager.getFreshAccessToken(GHOST, KEY, DECL)).resolves.toMatchObject({
+      ok: false, error: 'AUTH_EXPIRED',
+    });
+    expect(vault.data).toEqual(before);
+  });
+
+  it('does not write old asynchronous identity backfill into restored credentials', async () => {
+    const vault = seededVault('fake-same-refresh');
+    const before = new Map(vault.data);
+    let releaseIdentity!: (response: Response) => void;
+    const identityResponse = new Promise<Response>((resolve) => { releaseIdentity = resolve; });
+    const fetchImpl = vi.fn(async (input: string | URL | Request) => String(input) === DECL.tokenUrl
+      ? jsonResponse({ access_token: 'fake-access', expires_in: 3600 })
+      : identityResponse);
+    const manager = new GhostOauthAccountManager({
+      vault, openExternal: vi.fn(), fetchImpl: fetchImpl as typeof fetch,
+    });
+    const backfillTarget = manager as unknown as {
+      backfillIdentityExtras: (...parameters: unknown[]) => Promise<void>;
+    };
+    const runBackfill = backfillTarget.backfillIdentityExtras.bind(manager);
+    let backfillTask: Promise<void> | null = null;
+    vi.spyOn(backfillTarget, 'backfillIdentityExtras').mockImplementation((...parameters) => {
+      backfillTask = runBackfill(...parameters);
+      return backfillTask;
+    });
+    const decl = { ...DECL, identity: { ...DECL.identity!, displayTemplate: '{email}' } };
+    await expect(manager.getFreshAccessToken(GHOST, KEY, decl)).resolves.toMatchObject({ ok: true });
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(backfillTask).not.toBeNull();
+    manager.invalidateGhost(GHOST);
+    releaseIdentity(jsonResponse({ email: 'old-owner@example.com' }));
+    await backfillTask;
+    expect(vault.data).toEqual(before);
+  });
+
+  it.each(['token', 'identity', 'mutation'] as const)('retires a connect during %s and permits a fresh connect after rollback', async (transition) => {
+    const vault = memoryVault();
+    const target = { revision: 'approved-original' };
+    const decl = { ...DECL, clientId: 'fake-client' };
+    let shouldInvalidate = true;
+    const manager: GhostOauthAccountManager = new GhostOauthAccountManager({
+      vault, openExternal: autoBrowser(), captureConnectTarget: () => target,
+      isConnectTargetCurrent: () => true,
+      fetchImpl: (async (input) => {
+        const tokenRequest = String(input) === decl.tokenUrl;
+        if (shouldInvalidate && transition === (tokenRequest ? 'token' : 'identity')) {
+          manager.invalidateGhost?.(GHOST);
+        }
+        return tokenRequest
+          ? jsonResponse({ access_token: 'fake-access', refresh_token: 'fake-refresh', expires_in: 3600 })
+          : jsonResponse({ email: 'test@example.com' });
+      }) as typeof fetch,
+      withMutationLock: async (_ghostId, task) => {
+        if (shouldInvalidate && transition === 'mutation') manager.invalidateGhost?.(GHOST);
+        return task();
+      },
+    });
+    await expect(manager.connectAccount(GHOST, KEY, decl)).resolves.toMatchObject({
+      ok: false, error: 'INVALID_CONFIG',
+    });
+    expect(vault.data.size).toBe(0);
+    shouldInvalidate = false;
+    await expect(manager.connectAccount(GHOST, KEY, decl)).resolves.toMatchObject({ ok: true });
+    expect(manager.listAccounts(GHOST, KEY)).toHaveLength(1);
+  });
+
+  it('clears only the invalidated ghost cache even when restored credentials are identical', async () => {
+    const vault = seededVault('fake-same-refresh');
+    const otherGhostId = '_ns__acme__' + GHOST;
+    for (const [key, value] of [...vault.data]) {
+      vault.data.set(otherGhostId + key.slice(GHOST.length), value);
+    }
+    let fetchCount = 0;
+    const fetchImpl = vi.fn(async () => {
+      fetchCount += 1;
+      return jsonResponse({ access_token: 'fake-access-' + fetchCount, expires_in: 3600 });
+    });
+    const manager = new GhostOauthAccountManager({
+      vault, openExternal: vi.fn(), fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+    await expect(manager.getFreshAccessToken(GHOST, KEY, DECL)).resolves.toMatchObject({ accessToken: 'fake-access-1' });
+    await expect(manager.getFreshAccessToken(otherGhostId, KEY, DECL)).resolves.toMatchObject({ accessToken: 'fake-access-2' });
+    manager.invalidateGhost?.(GHOST);
+    await expect(manager.getFreshAccessToken(otherGhostId, KEY, DECL)).resolves.toMatchObject({ accessToken: 'fake-access-2' });
+    await expect(manager.getFreshAccessToken(GHOST, KEY, DECL)).resolves.toMatchObject({ accessToken: 'fake-access-3' });
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
+  });
+
+  it('rejects an old refresh with an identical token and does not delete the new generation single flight', async () => {
+    const vault = seededVault('fake-same-refresh');
+    let releaseOld!: (response: Response) => void;
+    let releaseNew!: (response: Response) => void;
+    const oldResponse = new Promise<Response>((resolve) => { releaseOld = resolve; });
+    const newResponse = new Promise<Response>((resolve) => { releaseNew = resolve; });
+    const fetchImpl = vi.fn().mockReturnValueOnce(oldResponse).mockReturnValueOnce(newResponse);
+    const manager = new GhostOauthAccountManager({
+      vault, openExternal: vi.fn(), fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+    const oldFlow = manager.getFreshAccessToken(GHOST, KEY, DECL);
+    manager.invalidateGhost?.(GHOST);
+    const newFlow = manager.getFreshAccessToken(GHOST, KEY, DECL);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    releaseOld(jsonResponse({ access_token: 'fake-old-access', refresh_token: 'fake-old-rotated', expires_in: 3600 }));
+    await expect(oldFlow).resolves.toMatchObject({ ok: false, error: 'AUTH_EXPIRED' });
+    expect(vault.read(GHOST, KEY + '-rt-acc-1')).toBe('fake-same-refresh');
+    const joinedNewFlow = manager.getFreshAccessToken(GHOST, KEY, DECL);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    releaseNew(jsonResponse({ access_token: 'fake-new-access', refresh_token: 'fake-new-rotated', expires_in: 3600 }));
+    await expect(newFlow).resolves.toMatchObject({ ok: true, accessToken: 'fake-new-access' });
+    await expect(joinedNewFlow).resolves.toMatchObject({ ok: true, accessToken: 'fake-new-access' });
+    expect(vault.read(GHOST, KEY + '-rt-acc-1')).toBe('fake-new-rotated');
+  });
+
+  it('does not delete or expire restored credentials after an old invalid_grant', async () => {
+    const vault = seededVault('fake-same-refresh');
+    const before = new Map(vault.data);
+    let releaseOld!: (response: Response) => void;
+    const response = new Promise<Response>((resolve) => { releaseOld = resolve; });
+    const onAccountStatusChanged = vi.fn();
+    const manager = new GhostOauthAccountManager({
+      vault, openExternal: vi.fn(), sleep: instantSleep, onAccountStatusChanged,
+      fetchImpl: vi.fn(() => response) as unknown as typeof fetch,
+    });
+    const oldFlow = manager.getFreshAccessToken(GHOST, KEY, DECL);
+    manager.invalidateGhost?.(GHOST);
+    releaseOld(jsonResponse({ error: 'invalid_grant' }, 400));
+    await expect(oldFlow).resolves.toMatchObject({ ok: false, error: 'AUTH_EXPIRED' });
+    expect(vault.data).toEqual(before);
+    expect(onAccountStatusChanged).not.toHaveBeenCalled();
   });
 });
 

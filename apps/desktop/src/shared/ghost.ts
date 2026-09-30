@@ -1742,10 +1742,10 @@ export function isOfficialGhostId(id: string): boolean {
 
 /**
  * 用户装入通道（拖入 / 选文件 / forge 转交 / 自定义市场）是否拒装该 id。
- * 当前与 `isOfficialGhostId` 等价；本批不放宽组织前缀。
+ * 仅保留 Cindy 平台前缀；XD/Filo 名字可普通导入，运行时资格另验可信来源。
  */
 export function isUserInstallReservedGhostId(id: string): boolean {
-  return isOfficialGhostId(id);
+  return id.startsWith(GHOST_OFFICIAL_ID_PREFIX);
 }
 
 /**
@@ -6716,6 +6716,18 @@ export type GhostPipeIOSSimulatorResult =
       instanceId?: string;
     }
   | { ok: false; errorCode: GhostPipeIOSSimulatorErrorCode; message: string };
+
+export const GHOST_MEDIA_HANDOVER_MIME = 'application/x-cindy-ghost-handover';
+
+export interface GhostMediaHandover {
+  uri: string;
+  sourceToken?: string;
+}
+
+export interface GhostPanelMediaTarget {
+  ghostId: string;
+  instanceId?: string;
+}
 
 /**
  * 上行:preview 槽——请主机在右侧栏内置浏览器打开一个预览标签页。

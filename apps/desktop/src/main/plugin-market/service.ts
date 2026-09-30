@@ -4,6 +4,7 @@ import crypto from 'node:crypto';
 
 import {
   isValidPluginResourceId,
+  isValidPluginNamespace,
   PLUGIN_PREFIX_PATTERN,
   type PluginCurrentOrganization,
   type PluginRemovalNotice,
@@ -84,6 +85,7 @@ import {
   deliveryNamespaceFields,
   downloadIdentityMatchesPlugin,
   findInstalledGhostByIdentity,
+  findInstalledGhostByInstanceId,
   hasDeliveryNamespace,
   installedGhostPhysicalRelId,
   installedGhostStoragePart,
@@ -369,15 +371,22 @@ export function organizationDefaultTakeoverEligibility(
     !summary.defaultInstall ||
     summary.scope !== 'organization' ||
     !currentOrganization ||
-    summary.organizationId !== currentOrganization.organizationId ||
-    typeof prefix !== 'string' ||
-    !PLUGIN_PREFIX_PATTERN.test(prefix) ||
-    !summary.ghostId.startsWith(`${prefix}-`)
+    summary.organizationId !== currentOrganization.organizationId
   ) {
     return { eligible: false, reason: 'not-current-organization-default' };
   }
   if (facts.record && knownDeliveryNamespacesDiffer(summary, facts.record)) {
     return { eligible: false, reason: 'cross-namespace' };
+  }
+  if (hasDeliveryNamespace(summary)) {
+    if (typeof summary.namespace !== 'string' || !isValidPluginNamespace(summary.namespace) ||
+        (currentOrganization.orgSlug !== undefined && currentOrganization.orgSlug !== summary.namespace) ||
+        !hasDeliveryNamespace(installed) || installed.namespace !== summary.namespace) {
+      return { eligible: false, reason: 'cross-namespace' };
+    }
+  } else if (hasDeliveryNamespace(installed) || typeof prefix !== 'string' ||
+      !PLUGIN_PREFIX_PATTERN.test(prefix) || !summary.ghostId.startsWith(`${prefix}-`)) {
+    return { eligible: false, reason: 'not-current-organization-default' };
   }
   if (!facts.uniqueGhostId && !hasDeliveryNamespace(summary)) {
     return { eligible: false, reason: 'duplicate-ghost-id' };
@@ -1486,7 +1495,7 @@ export class PluginMarketService {
    * Captures the active owner and ledger before a local-page uninstall starts.
    * The returned completion records opt-out only after the package was removed.
    */
-  prepareLocalUninstallTracking(ghostId: string): (() => Promise<void>) | null {
+  prepareLocalUninstallTracking(target: string | InstalledGhost): (() => Promise<void>) | null {
     let owner: ActiveAppSession;
     try {
       owner = captureMarketOwner();
@@ -1494,12 +1503,23 @@ export class PluginMarketService {
       return null;
     }
     const ledger = this.ledgerForOwner(owner);
-    const record = ledger.installationForLookup(ghostId);
-    if (!record?.installed) return null;
+    const ghost = typeof target === 'string'
+      ? findInstalledGhostByInstanceId(getGhostManager().list(), target)
+      : target;
+    if (!ghost) return null;
+    const record = ledger.installationForLocalUninstall({
+      ghostId: ghost.manifest.id,
+      ...deliveryNamespaceFields(ghost),
+    });
+    if (!record) return null;
+    const identity = readInstalledMarketManifestIdentity(ghost.dir);
+    if (!identity || !verifyInstalledMarketManifest(record, identity, {
+      allowLegacyRecordWithoutDigest: true,
+    })) return null;
     const installSubject = defaultInstallSubject(owner);
     return async () => {
       await this.withCapturedLedgerMutation(ledger, () => {
-        ledger.markRemovedRecord(record, installSubject);
+        ledger.markRemovedRecordIfUnchanged(record, installSubject);
       });
     };
   }
@@ -1725,6 +1745,7 @@ export class PluginMarketService {
         let replacedRoute: PluginMarketInstallationRecord | null = null;
         let replacedRouteWasSuppressed = false;
         let packageLanded = false;
+        let sourceChanged = false;
         requireSameMarketOwner(owner);
         const consentDecision: GhostInstallConsentDecision =
           'rejection' in packed.inspected
@@ -1739,6 +1760,7 @@ export class PluginMarketService {
           expectedGhostId: plugin.ghostId,
           expectedVersion: plugin.version,
           consent: consentDecision,
+          sourceChanged: () => sourceChanged,
           beforeCommit: async () => {
             requireSameMarketOwner(owner);
             assertCurrent?.();
@@ -1786,6 +1808,14 @@ export class PluginMarketService {
             }
             // raw manifest 摘要不含 Host receipt；内容未变但批准态变化也必须拒绝。
             assertCustomApprovalStateUnchanged(current ?? null);
+            const record = ledger.installationForPlugin(plugin);
+            const routeStillMatches = Boolean(current && record?.installed &&
+              record.pluginId === pluginId && record.sourceKey === sourceKey &&
+              currentIdentity && verifyInstalledMarketManifest(record, currentIdentity));
+            if (current && !routeStillMatches && options.allowSourceReplacement !== true) {
+              throwIpcError('PRECONDITION_FAILED', 'Installed Plugin source changed');
+            }
+            sourceChanged = Boolean(current && !routeStillMatches);
           },
           expectedInstalledApproval: options.expectedInstalledApproval,
           beforePackagePlacement: () => {
@@ -2307,19 +2337,22 @@ export class PluginMarketService {
         }
       }
       requireSameMarketOwner(owner);
-      const replacingSource = Boolean(
+      const sourceChanged = Boolean(
         installedNow &&
-        options.sourceReplacementMode === 'user-requested-source-change' &&
-        currentRecordNow?.installed &&
+        (options.sourceReplacementMode === 'user-requested-source-change' ||
+          options.sourceReplacementMode === 'organization-default-takeover') &&
         !serverRecordMatchesInstalledGhost(plugin.id, installedNow, currentRecordNow),
       );
+      const replacingSource = sourceChanged &&
+        options.sourceReplacementMode === 'user-requested-source-change' &&
+        currentRecordNow?.installed === true;
       let routeDetached = false;
       let replacedRouteWasSuppressed = false;
       let packageLanded = false;
       const detachPreviousRoute = (): void => {
         requireSameMarketOwner(owner);
         options.beforeCommitInLock?.();
-        if (!replacingSource || !currentRecordNow) return;
+        if (!replacingSource || !currentRecordNow?.installed) return;
         replacedRouteWasSuppressed = this.detachMarketRouteForReplacement(
           ledger,
           currentRecordNow,
@@ -2331,20 +2364,17 @@ export class PluginMarketService {
         ghostId: plugin.ghostId,
         version: plugin.currentRelease.version,
         consent: options.consent,
+        ...(sourceChanged ? { sourceChanged: true } : {}),
         ...deliveryNamespaceFields(plugin),
         ...(plugin.ghostId === 'cindy-github' && plugin.scope === 'public' &&
           plugin.namespace == null ? { officialCindyGithub: true } : {}),
-        ...(plugin.scope === 'organization' && plugin.organizationId
-          ? {
-              pendingMarketRecord: {
-                scope: plugin.scope,
-                organizationId: plugin.organizationId,
-                source: 'market',
-                installed: true,
-                sha256: plugin.currentRelease.sha256,
-              },
-            }
-          : {}),
+        pendingMarketRecord: {
+          scope: plugin.scope,
+          organizationId: plugin.organizationId ?? null,
+          source: 'market',
+          installed: true,
+          sha256: plugin.currentRelease.sha256,
+        },
         ...(options.expectedInstalledApproval !== undefined
           ? { expectedInstalledApproval: options.expectedInstalledApproval }
           : {}),

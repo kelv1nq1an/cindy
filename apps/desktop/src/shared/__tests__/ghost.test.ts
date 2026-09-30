@@ -2911,7 +2911,7 @@ describe('ghost · 官方保留 id 前缀', () => {
     expect(isOfficialGhostId('web-search')).toBe(false);
   });
 
-  it('四个官方 id 谓词对本阶段同一组输入返回完全相同的结果', () => {
+  it('历史官方名字谓词不决定普通导入准入', () => {
     const cases: ReadonlyArray<readonly [id: string, expected: boolean]> = [
       ['cindy-art', true],
       ['filo-google', true],
@@ -2924,12 +2924,12 @@ describe('ghost · 官方保留 id 前缀', () => {
     ];
     const predicates = [
       isOfficialGhostId,
-      isUserInstallReservedGhostId,
       isBrokerEligibleGhostId,
       isFirstPartyHostPrivilegeGhostId,
     ];
     // 期望值写死,避免用任一被测谓词或同一前缀表反推 expected 后让错误实现自证正确。
     for (const [id, expected] of cases) {
+      expect(isUserInstallReservedGhostId(id)).toBe(id === 'cindy-art');
       for (const predicate of predicates) {
         expect(predicate(id), `${predicate.name}(${JSON.stringify(id)})`).toBe(expected);
       }

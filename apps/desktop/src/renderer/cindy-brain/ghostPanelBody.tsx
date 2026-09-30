@@ -12,7 +12,7 @@ import {
 } from '@/components/ui/dropdown-menu';
 import { toast } from '@/lib/toast';
 
-import { GHOST_SCHEME, ghostPartition, type InstalledGhost } from '../../shared/ghost';
+import { GHOST_SCHEME, ghostPartition, ghostInstallApprovalToken, type InstalledGhost } from '../../shared/ghost';
 import { installedGhostLogicalIdentity, installedGhostStoragePart, pluginStoragePart } from '../../shared/pluginIdentity';
 import { createGhostThemeInjector, observeHostTheme } from './ghostPanelTheme';
 import {
@@ -195,12 +195,13 @@ export function GhostWebviewBody({
   html,
   onHostNode,
 }: {
-  ghost: Pick<InstalledGhost, 'manifest' | 'dir' | 'namespace'>;
+  ghost: Pick<InstalledGhost, 'manifest' | 'dir' | 'namespace'> & Partial<Pick<InstalledGhost, 'approval'>>;
   html: string | undefined;
   onHostNode?: (node: HTMLDivElement | null) => void;
 }): ReactNode {
   const { manifest } = ghost;
   const instanceId = installedGhostStoragePart(ghost);
+  const approvalToken = ghostInstallApprovalToken(ghost.approval);
   const [crashed, setCrashed] = useState(false);
   const partitionClaim = ghostPartition(pluginStoragePart(installedGhostLogicalIdentity(ghost)));
   const [generation, setGeneration] = useState(0);
@@ -256,7 +257,7 @@ export function GhostWebviewBody({
       // (OOPIF 命中测试按根帧算;Windows 实测 2077 > 面板宽,叠加 rect 会把
       // 菜单顶出屏外),直接用,不要再加 webview 偏移。
       const pos = { x: e.params.x, y: e.params.y };
-      void window.electronAPI.ghosts.resolvePanelMedia(uri, 'menu').then(
+      void window.electronAPI.ghosts.resolvePanelMedia(uri, 'menu', instanceId).then(
         ({ url, kind }) => {
           if (disposed) return;
           // 焦点还在 guest 里,不挪回宿主的话 Esc/方向键进不了菜单
@@ -292,7 +293,7 @@ export function GhostWebviewBody({
     };
     // version 入依赖:原位更新换版后 webview 重挂载,面板立刻跑新代码
     // (供片协议直读安装目录,不重挂会一直渲染旧版缓存的页面)。
-  }, [crashed, generation, instanceId, partitionClaim, manifest.id, manifest.version, manifest.resolvedLocale, html]);
+  }, [crashed, generation, instanceId, approvalToken, partitionClaim, manifest.id, manifest.version, manifest.resolvedLocale, html]);
 
   if (crashed) {
     return (
@@ -325,7 +326,7 @@ export function GhostWebviewBody({
 export function GhostChipPanelBody({
   ghost,
 }: {
-  ghost: Pick<InstalledGhost, 'manifest' | 'dir' | 'namespace'>;
+  ghost: Pick<InstalledGhost, 'manifest' | 'dir' | 'namespace'> & Partial<Pick<InstalledGhost, 'approval'>>;
 }): ReactNode {
   const { manifest } = ghost;
   /**

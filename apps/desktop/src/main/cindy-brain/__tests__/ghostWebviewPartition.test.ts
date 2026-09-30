@@ -15,6 +15,14 @@ describe('ghost WebView Main partition', () => {
   const ownerA = { mode: 'cloud' as const, dataOwnerId: 'owner-a' };
   const ownerB = { mode: 'cloud' as const, dataOwnerId: 'owner-b' };
 
+  it('isolates approved receipts even when source version and panel HTML are unchanged', () => {
+    const original = { manifest: { id: 'source-change', version: '1.0.0' }, approval: { state: 'approved' as const, revision: 'receipt-a' } };
+    const replacement = { ...original, approval: { state: 'approved' as const, revision: 'receipt-b' } };
+    const originalPartition = ownerScopedGhostPartitionForInstalledGhost(original, ownerA);
+    expect(ownerScopedGhostPartitionForInstalledGhost(original, ownerA)).toBe(originalPartition);
+    expect(ownerScopedGhostPartitionForInstalledGhost(replacement, ownerA)).not.toBe(originalPartition);
+  });
+
   it('同 owner + ghost 稳定，不同 owner + 同 ghost 使用不同 session', () => {
     const partitionA = ownerScopedGhostPartition('same-ghost', ownerA);
     const partitionB = ownerScopedGhostPartition('same-ghost', ownerB);

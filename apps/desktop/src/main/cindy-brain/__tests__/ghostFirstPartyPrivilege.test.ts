@@ -28,12 +28,26 @@ const BUNDLED_NON_OFFICIAL_IDS = [
 ] as const;
 
 function facts(partial: Partial<GhostFirstPartyFacts> & Pick<GhostFirstPartyFacts, 'ghostId'>): GhostFirstPartyFacts {
+  const namespace = partial.namespace !== undefined ? partial.namespace :
+    !partial.builtin && partial.marketRecord?.scope === 'organization'
+      ? partial.currentOrganization?.orgSlug ?? 'acme' : null;
   return {
     builtin: false,
-    namespace: null,
+    namespace,
     marketRecord: null,
     currentOrganization: null,
     installOrigin: 'manual',
+    ...(partial.builtin && ['xd-feishu', 'xd-atlassian', 'xd-mivo', 'cindy-web-search', 'cindy-art'].includes(partial.ghostId)
+      ? {
+          trustedSource: {
+            kind: 'builtin-official' as const,
+            ghostId: partial.ghostId,
+            namespace,
+            packageSha256: 'a'.repeat(64),
+          },
+          approvedPackageSha256: 'a'.repeat(64),
+        }
+      : {}),
     ...partial,
   };
 }
@@ -152,7 +166,7 @@ describe('resolveGhostFirstPartyPrivilege', () => {
     ).toMatchObject({ basis: 'builtin-official', brokerEligible: true });
   });
 
-  it('trusts server-market public installs only when the id hits the static table', () => {
+  it('trusts server-market public installs only with approved official resource evidence', () => {
     expect(
       resolveGhostFirstPartyPrivilege(
         facts({

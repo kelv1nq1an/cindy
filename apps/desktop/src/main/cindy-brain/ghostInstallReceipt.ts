@@ -9,6 +9,7 @@ import {
   hasDeliveryNamespace,
   isValidPluginInstallRelId,
   parsePluginInstallRelId,
+  parsePluginStoragePart,
   PLUGIN_NS_INSTALL_ROOT,
   pluginInstallRelId,
   pluginStoragePart,
@@ -112,6 +113,7 @@ export interface GhostInstallReceipt {
    * receipt 中的同名值继续有效，避免升级后丢失既有企业作者自测资格。
    */
   installOrigin?: string;
+  legacyFirstPartyEligible?: boolean;
   /**
    * 按 skill item 目录钉住的固化字节指纹(`item.dir` → sha256)。声明了 skill 能力
    * 时逐项必填，没声明时是空对象。
@@ -209,6 +211,7 @@ export type GhostPendingMutation =
       phase?: 'prepared' | 'backed-up' | 'published';
       /** Hash of the previously approved bytes, when an approval existed. */
       oldPackageSha256?: string;
+      sourceStateArchiveId?: string;
     }
   // uninstall 不带 packageSha256:它的提交信号不是"receipt 写到某版本",而是"receipt +
   // 内容目录都已移除"。恢复见到它就把两者删干净(顺序无关,幂等)。
@@ -220,6 +223,14 @@ export type GhostPendingMutationReadResult =
   | { state: 'missing' }
   | { state: 'invalid'; reason: string }
   | { state: 'unreadable'; reason: string };
+
+export function isValidGhostSourceStateArchiveId(value: unknown): value is string {
+  if (typeof value !== 'string') return false;
+  const identity = parsePluginStoragePart(value);
+  return identity !== null && pluginStoragePart(identity) === value &&
+    identity.namespace !== null && identity.namespace.startsWith('cindy-archive-') &&
+    isRevision(identity.namespace.slice('cindy-archive-'.length));
+}
 
 export type GhostPendingMutationListResult =
   { state: 'ok'; ids: string[]; blocked: boolean } | { state: 'unreadable'; reason: string };
@@ -264,6 +275,33 @@ export class GhostInstallReceiptStore {
     if (result.state === 'approved') return result;
     if (result.state === 'missing') return { state: 'legacy-unapproved' };
     return { state: 'invalid', reason: result.reason };
+  }
+
+  captureLegacyFirstPartyEligibilitySync(id: string, expectedRevision: string): void {
+    const identity = parsePluginInstallRelId(id);
+    const read = this.readForRecovery(id);
+    if (!identity || identity.namespace !== null || read.state !== 'approved' ||
+        read.receipt.revision !== expectedRevision || hasDeliveryNamespace(read.receipt)) {
+      throw new Error('legacy qualification requires the exact censused root approval');
+    }
+    const target = this.receiptPath(id);
+    this.assertPathParentSync(target);
+    const root = this.realRootDirSync();
+    const temp = path.join(root, '.legacy-qualification-' + crypto.randomBytes(12).toString('hex') + '.tmp');
+    const receipt = {
+      ...read.receipt, legacyFirstPartyEligible: true,
+      manifest: ghostManifestToAuthorFormat(read.receipt.manifest),
+    };
+    try {
+      fs.writeFileSync(temp, JSON.stringify(receipt, null, 2) + '\n', { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+      fs.renameSync(temp, target);
+    } finally {
+      try {
+        fs.rmSync(temp, { force: true });
+      } catch (error) {
+        void error;
+      }
+    }
   }
 
   /** Recovery must not confuse transient state-root IO with missing/corrupt approval state. */
@@ -736,6 +774,11 @@ export class GhostInstallReceiptStore {
 
   /** 事务开始:装入/更新 rename 动盘**之前**落标记(原子 temp+rename;re-begin 覆盖)。 */
   async writePendingMutation(id: string, entry: GhostPendingMutation): Promise<void> {
+    if (entry.kind === 'update' && entry.sourceStateArchiveId !== undefined &&
+        (!isValidGhostSourceStateArchiveId(entry.sourceStateArchiveId) ||
+          entry.receiptRevision === undefined)) {
+      throw new Error('journal source state archive identity is invalid');
+    }
     const root = this.rootDir();
     const target = this.pendingMutationPath(id);
     fs.mkdirSync(root, { recursive: true });
@@ -882,6 +925,11 @@ export class GhostInstallReceiptStore {
       }
       const oldPackageSha256 = raw.oldPackageSha256;
       const receiptRevision = raw.receiptRevision;
+      const sourceStateArchiveId = raw.sourceStateArchiveId;
+      if (sourceStateArchiveId !== undefined &&
+          (!isValidGhostSourceStateArchiveId(sourceStateArchiveId) || receiptRevision === undefined)) {
+        return { state: 'invalid', reason: 'journal source state archive identity is invalid' };
+      }
       if (
         receiptRevision !== undefined &&
         (typeof receiptRevision !== 'string' || !isRevision(receiptRevision))
@@ -903,6 +951,7 @@ export class GhostInstallReceiptStore {
           ...(receiptRevision !== undefined ? { receiptRevision } : {}),
           ...(phase !== undefined ? { phase } : {}),
           ...(oldPackageSha256 !== undefined ? { oldPackageSha256 } : {}),
+          ...(sourceStateArchiveId !== undefined ? { sourceStateArchiveId } : {}),
         },
       };
     }
@@ -1172,6 +1221,7 @@ export function createGhostInstallReceipt(input: {
   iconDataUrl?: string;
   installOrigin?: string;
   namespace?: string | null;
+  legacyFirstPartyEligible?: boolean;
 }): GhostInstallReceipt {
   if (input.installOrigin !== undefined && !isPersistableInstallOrigin(input.installOrigin)) {
     throw new Error('receipt installOrigin 不合法');
@@ -1191,6 +1241,7 @@ export function createGhostInstallReceipt(input: {
     ...(input.packageSha256 ? { packageSha256: input.packageSha256 } : {}),
     ...(input.iconDataUrl ? { iconDataUrl: input.iconDataUrl } : {}),
     ...(input.installOrigin !== undefined ? { installOrigin: input.installOrigin } : {}),
+    ...(input.legacyFirstPartyEligible === true ? { legacyFirstPartyEligible: true } : {}),
   };
 }
 
@@ -1210,6 +1261,13 @@ export function effectiveInstallOrigin(
   receipt: Pick<GhostInstallReceipt, 'installOrigin'>,
 ): 'manual' | 'agent-forge' {
   return receipt.installOrigin === 'agent-forge' ? 'agent-forge' : 'manual';
+}
+
+export function legacyFirstPartyEligibilityAfterUpdate(
+  receipt: Pick<GhostInstallReceipt, 'legacyFirstPartyEligible'>,
+  sourceChanged: boolean,
+): boolean {
+  return !sourceChanged && receipt.legacyFirstPartyEligible === true;
 }
 
 /**
@@ -1350,6 +1408,10 @@ function validateReceipt(
     }
     namespace = value.namespace === null ? null : value.namespace;
   }
+  if (value.legacyFirstPartyEligible !== undefined &&
+      typeof value.legacyFirstPartyEligible !== 'boolean') {
+    return { ok: false, reason: 'receipt legacyFirstPartyEligible 不合法' };
+  }
   let installOrigin: string | undefined;
   if (value.installOrigin !== undefined) {
     if (
@@ -1374,6 +1436,7 @@ function validateReceipt(
       ...(typeof value.packageSha256 === 'string' ? { packageSha256: value.packageSha256 } : {}),
       ...(typeof value.iconDataUrl === 'string' ? { iconDataUrl: value.iconDataUrl } : {}),
       ...(installOrigin !== undefined ? { installOrigin } : {}),
+      ...(value.legacyFirstPartyEligible === true ? { legacyFirstPartyEligible: true } : {}),
       ...(namespace !== undefined ? { namespace } : {}),
     },
   };

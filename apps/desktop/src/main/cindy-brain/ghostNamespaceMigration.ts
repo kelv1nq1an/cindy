@@ -381,7 +381,10 @@ export function resolveInstallAgainstPending(input: {
   if (input.classification.namespace === input.requestedNamespace) {
     return { kind: 'already-installed' };
   }
-  return { kind: 'proceed' };
+  return {
+    kind: 'wait',
+    reason: '旧插件 namespace 尚未提交，请等待迁移完成后再安装同名企业实例',
+  };
 }
 
 export interface NamespaceMigrationStore {

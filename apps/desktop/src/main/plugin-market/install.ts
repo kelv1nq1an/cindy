@@ -75,6 +75,7 @@ export interface PackedCustomMarketPlugin {
 }
 
 type CustomMarketCommitHooks = {
+  sourceChanged?: boolean | (() => boolean);
   expectedInstalledApproval?: string;
   beforeCommit?: () => void | Promise<void>;
   beforePackagePlacement?: () => void;
@@ -247,6 +248,8 @@ export async function commitCustomMarketPlugin(
       ghostId: input.expectedGhostId,
       version: input.expectedVersion,
       consent: input.consent,
+      ...((typeof input.sourceChanged === 'function' ? input.sourceChanged() : input.sourceChanged)
+        ? { sourceChanged: true } : {}),
       // 发现时读到的规范化 Manifest 是这次安装允许的能力上限。打包窗口
       // 中目录若发生能力扩张，Host 会按真实包不一致直接拒绝。
       manifestCap: packed.validatedManifest,
@@ -272,6 +275,7 @@ export async function commitCustomMarketPlugin(
 }
 
 export async function installCustomMarketPlugin(input: {
+  sourceChanged?: boolean | (() => boolean);
   pluginDir: string;
   expected?: GhostManifest;
   /** 更新时把发起操作时读取的 Host receipt token 贯穿到最终安装出口。 */
@@ -336,6 +340,7 @@ export async function installCustomMarketPlugin(input: {
       expectedGhostId: input.expectedGhostId,
       expectedVersion: input.expectedVersion,
       consent,
+      sourceChanged: input.sourceChanged,
       expectedInstalledApproval: input.expectedInstalledApproval,
       beforeCommit: input.beforeCommit,
       beforePackagePlacement: input.beforePackagePlacement,

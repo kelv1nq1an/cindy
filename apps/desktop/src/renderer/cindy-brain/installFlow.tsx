@@ -7,7 +7,10 @@ import {
   type GhostManifest,
   type InstalledGhost,
 } from '../../shared/ghost';
-import { findInstalledGhostByInstanceId, installedGhostStoragePart } from '../../shared/pluginIdentity';
+import {
+  findInstalledGhostByInstanceId,
+  installedGhostStoragePart,
+} from '../../shared/pluginIdentity';
 import { ghostInstallErrorKey } from './installErrorKey';
 
 /**
@@ -120,20 +123,31 @@ export async function pickAndUpdateGhost(expectedId: string, deps: InstallFlowDe
   const picked = await window.electronAPI.ghosts.pickFile().catch(() => null);
   if (!picked || 'canceled' in picked) return;
 
+  const installed = findInstalled(expectedId);
   let manifest: GhostManifest;
   let packageSha256: string;
   try {
-    const inspected = await window.electronAPI.ghosts.inspect(picked.filePath);
+    const inspected = await window.electronAPI.ghosts.inspect(
+      picked.filePath,
+      installed
+        ? {
+            expectedInstalledInstanceId: installedGhostStoragePart(installed),
+            expectedInstalledApproval: ghostInstallApprovalToken(installed.approval),
+          }
+        : undefined,
+    );
     manifest = inspected.manifest;
     packageSha256 = inspected.packageSha256;
   } catch (err) {
     await showInstallError(err, deps);
     return;
   }
-  const installed = findInstalled(expectedId);
   if (installed && manifest.id !== installed.manifest.id) {
     toast.error(
-      t('settings.ghosts.errors.updateIdMismatch', { id: manifest.id, expected: installed.manifest.id }),
+      t('settings.ghosts.errors.updateIdMismatch', {
+        id: manifest.id,
+        expected: installed.manifest.id,
+      }),
     );
     return;
   }

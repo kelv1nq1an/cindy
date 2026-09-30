@@ -1,7 +1,7 @@
 /** @vitest-environment jsdom */
 
 import { fireEvent, render, waitFor } from '@testing-library/react';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../ghostPanelTheme', () => ({
   createGhostThemeInjector: () => ({
@@ -28,6 +28,40 @@ const manifest: GhostManifest = {
 };
 
 describe('GhostWebviewBody', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it.each(['panel.html', 'main-view.html'])('recreates %s on a same-version receipt replacement', (html) => {
+    const ghost = { manifest, dir: '/plugins/workspace', approval: { state: 'approved' as const, revision: 'receipt-a' } };
+    const { container, rerender } = render(<GhostWebviewBody ghost={ghost} html={html} />);
+    const original = container.querySelector('webview');
+    rerender(<GhostWebviewBody ghost={{ ...ghost, approval: { state: 'approved', revision: 'receipt-b' } }} html={html} />);
+    const replacement = container.querySelector('webview');
+    expect(replacement).not.toBe(original);
+    expect(original?.isConnected).toBe(false);
+    expect(replacement?.getAttribute('src')).toBe('cindy-ghost://workspace/' + html);
+    rerender(<GhostWebviewBody ghost={{ ...ghost, approval: { state: 'approved', revision: 'receipt-b' } }} html={html} />);
+    expect(container.querySelector('webview')).toBe(replacement);
+  });
+
+  it.each([
+    ['/plugins/workspace', undefined, 'workspace'],
+    ['/plugins/workspace', null, 'workspace'],
+    ['/plugins/workspace', 'acme', 'workspace'],
+    ['/plugins/_ns/acme/workspace', 'acme', '_ns__acme__workspace'],
+  ] as const)('passes the physical instance for context menus at %s', async (dir, namespace, instanceId) => {
+    const resolvePanelMedia = vi.fn(async () => { throw new Error('not-owned'); });
+    vi.stubGlobal('electronAPI', { ghosts: { resolvePanelMedia } });
+    const { container } = render(
+      <GhostWebviewBody ghost={{ manifest, dir, ...(namespace === undefined ? {} : { namespace }) }} html={manifest.mainView?.html} />,
+    );
+    const webview = container.querySelector('webview') as HTMLElement;
+    const uri = 'cindy-ghost://workspace/media/' + 'a'.repeat(64) + '.png';
+    const event = new Event('context-menu');
+    Object.defineProperty(event, 'params', { value: { mediaType: 'image', srcURL: uri, x: 10, y: 20 } });
+    fireEvent(webview, event);
+    await waitFor(() => expect(resolvePanelMedia).toHaveBeenCalledExactlyOnceWith(uri, 'menu', instanceId));
+  });
+
   it('keeps the existing per-plugin partition and approved cindy-ghost entry shape', async () => {
     const { container } = render(
       <GhostWebviewBody ghost={{ manifest, dir: '/plugins/workspace' }} html={manifest.mainView?.html} />,

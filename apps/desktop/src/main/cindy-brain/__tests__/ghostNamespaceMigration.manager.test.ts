@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { InstalledGhost } from '../../../shared/ghost.js';
 import { createOrganizationPrefixStore } from '../../plugin-market/organizationPrefixStore.js';
+import { PluginMarketLedger } from '../../plugin-market/ledger.js';
 import { GhostManager } from '../GhostManager.js';
 import {
   classifyNamespaceMigration,
@@ -688,6 +689,72 @@ describe('GhostManager namespace migration census', () => {
       rejection: { code: 'namespace-migration-pending' },
     });
     expect(fs.existsSync(path.join(rootDir, '_ns', 'acme', 'hello'))).toBe(false);
+  });
+
+  it('defers a classified busy root and commits its identity before installing a sibling', async () => {
+    await plantLegacyInstall('hello');
+    const marketLedger = new PluginMarketLedger(path.join(workDir, 'market', 'ledger.v1.json'));
+    marketLedger.upsertInstallation({
+      pluginId: 'root-resource', ghostId: 'hello', releaseId: 'root-release',
+      version: '1.0.0', sha256: 'a'.repeat(64), scope: 'public', organizationId: null,
+      source: 'market', installed: true, updatedAt: '2026-09-30T00:00:00.000Z',
+    });
+    let busy = true;
+    manager = new GhostManager({
+      getRootDir: () => rootDir,
+      isNamespaceMigrationBusy: () => busy,
+      classifyPendingNamespace: (ghostId) => classifyNamespaceMigration({
+        ghostId, builtin: false, installOrigin: 'manual', marketSyncCompleted: true,
+        marketRecord: readNamespaceMigrationMarketRecord(() => marketLedger.installationsForGhost(ghostId)),
+        currentOrganization: null,
+      }),
+      beforeNamespaceCommit: (ghostId, namespace) => {
+        if (!marketLedger.stampNamespaceIfAbsent(ghostId, namespace)) throw new Error('stamp failed');
+      },
+      mutateSnapshot: async ({ parentDir, ...request }) => {
+        await runGhostSnapshotWorkerRequest(request, parentDir);
+      },
+    });
+    manager.list();
+    await manager.reconcilePendingRootNamespaces(true);
+    const orgCindy = await makeCindy('hello');
+    await expect(manager.install(orgCindy, { namespace: 'acme' })).resolves.toMatchObject({
+      rejection: { code: 'namespace-migration-pending' },
+    });
+    expect(marketLedger.installationsForGhost('hello')).toHaveLength(1);
+    expect(manager.list()[0]?.namespaceMigration).toBe('pending');
+    expect(fs.existsSync(path.join(rootDir, '_ns', 'acme', 'hello'))).toBe(false);
+    busy = false;
+    await expect(manager.install(orgCindy, { namespace: 'acme' })).resolves.toMatchObject({
+      ghost: { namespace: 'acme' },
+    });
+    expect(marketLedger.installationForPlugin({ ghostId: 'hello', namespace: null })).toMatchObject({ namespace: null });
+    expect(manager.ensureNamespaceMigrationCensus()?.entries).toEqual({});
+    expect(manager.list().find((ghost) => ghost.dir === path.join(rootDir, 'hello'))).toMatchObject({ namespace: null });
+  });
+
+  it('keeps an already ambiguous multi-record pending install blocked without stamping either row', async () => {
+    await plantLegacyInstall('hello');
+    const beforeCommit = vi.fn();
+    manager = new GhostManager({
+      getRootDir: () => rootDir,
+      classifyPendingNamespace: (ghostId) => classifyNamespaceMigration({
+        ghostId, builtin: false, installOrigin: 'manual', marketSyncCompleted: true,
+        marketRecord: readNamespaceMigrationMarketRecord(() => [
+          { scope: 'public', source: 'market', organizationId: null, installed: true },
+          { scope: 'organization', source: 'market', organizationId: 'org-acme', namespace: 'acme', installed: true },
+        ]),
+        currentOrganization: null,
+      }),
+      beforeNamespaceCommit: beforeCommit,
+    });
+    manager.list();
+    await manager.reconcilePendingRootNamespaces(true);
+    await expect(manager.install(await makeCindy('hello'), { namespace: 'other' })).resolves.toMatchObject({
+      rejection: { code: 'namespace-migration-pending' },
+    });
+    expect(beforeCommit).not.toHaveBeenCalled();
+    expect(manager.list()[0]?.namespaceMigration).toBe('pending');
   });
 
   it('allows the organization instance after the pending root install is classified', async () => {

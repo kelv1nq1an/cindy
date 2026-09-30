@@ -61,6 +61,13 @@ export interface PluginMarketInstallationRecord {
   rawManifestSha256?: string;
 }
 
+export type PluginMarketAuthorizationTarget = { ghostId: string; namespace?: string | null };
+
+export type PluginMarketAuthorizationLookup =
+  | { kind: 'absent' }
+  | { kind: 'found'; record: PluginMarketInstallationRecord }
+  | { kind: 'invalid' };
+
 /** 递归按键排序的规范化 JSON(摘要必须与对象键序无关,两侧独立算也一致)。 */
 function canonicalJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
@@ -369,6 +376,27 @@ export class PluginMarketLedger {
     return this.read().installations[pluginLedgerRecordKey(plugin)] ?? null;
   }
 
+  installationForLocalUninstall(plugin: {
+    ghostId: string;
+    namespace?: string | null;
+  }): PluginMarketInstallationRecord | null {
+    const record = this.installationForPlugin(plugin);
+    if (!record?.installed || record.ghostId !== plugin.ghostId) return null;
+    if (hasDeliveryNamespace(plugin) && hasDeliveryNamespace(record) &&
+        plugin.namespace !== record.namespace) return null;
+    if (hasDeliveryNamespace(plugin) && plugin.namespace === null && record.scope === 'organization') {
+      return null;
+    }
+    return record;
+  }
+
+  markRemovedRecordIfUnchanged(record: PluginMarketInstallationRecord, userId: string | null): boolean {
+    const current = this.installationForPlugin(record);
+    if (!current || canonicalJson(current) !== canonicalJson(record)) return false;
+    this.markRemovedRecord(current, userId);
+    return true;
+  }
+
   /**
    * Resolve a runtime/UI id to a ledger row.
    * `_ns/...` and `_ns__...` are org instance ids. A bare ghostId prefers the
@@ -378,29 +406,61 @@ export class PluginMarketLedger {
     return this.recordForLookup(this.read().installations, id);
   }
 
+  installationForAuthorization(target: PluginMarketAuthorizationTarget): PluginMarketInstallationRecord | null {
+    const lookup = this.lookupInstallationForAuthorization(target);
+    if (lookup.kind === 'invalid') throw new Error('Plugin market ledger is unreadable');
+    return lookup.kind === 'found' ? lookup.record : null;
+  }
+
+  lookupInstallationForAuthorization(target: PluginMarketAuthorizationTarget): PluginMarketAuthorizationLookup {
+    const { main, custom, namespaced } = this.readFiles();
+    if (main.kind === 'invalid' || custom.kind === 'invalid' || namespaced.kind === 'invalid') {
+      return { kind: 'invalid' };
+    }
+    const merged = this.mergeInstallations(main, custom, namespaced).installations;
+    const precise = hasDeliveryNamespace(target);
+    const record = precise
+      ? merged[pluginLedgerRecordKey(target)] ?? null
+      : this.recordForLookup(merged, target.ghostId);
+    if (record) {
+      if (precise && (record.ghostId !== target.ghostId ||
+          (hasDeliveryNamespace(record) && record.namespace !== target.namespace) ||
+          (target.namespace === null && record.scope === 'organization'))) {
+        return { kind: 'absent' };
+      }
+      return { kind: 'found', record };
+    }
+    const mentionsUnparsedTarget = (file: InstallationsFileRead): boolean => {
+      if (!precise) return rawMentionsGhost(file, target.ghostId);
+      const raw = file.raw?.installations;
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return false;
+      return Object.entries(raw).some(([key, value]) => {
+        if (validRecord(value) && hasDeliveryNamespace(value) && value.namespace !== target.namespace) return false;
+        if (!value || typeof value !== 'object' || Array.isArray(value)) {
+          return key === pluginLedgerRecordKey(target);
+        }
+        const candidate = value as { ghostId?: unknown; namespace?: unknown };
+        return key === pluginLedgerRecordKey(target) ||
+          (candidate.ghostId === target.ghostId &&
+            (!hasDeliveryNamespace(candidate) || candidate.namespace === target.namespace));
+      });
+    };
+    return [main, custom, namespaced].some(mentionsUnparsedTarget)
+      ? { kind: 'invalid' } : { kind: 'absent' };
+  }
+
   /**
    * Connection OIDC lookup. Missing files are absent; a present but unreadable
    * or schema-invalid ledger is a hard failure so callers cannot treat
    * corruption as "no market record".
    */
   lookupInstallationForOidc(
-    ghostId: string,
-  ): { kind: 'absent' } | { kind: 'found'; record: PluginMarketInstallationRecord } | { kind: 'invalid' } {
-    const { main, custom, namespaced } = this.readFiles();
-    if (main.kind === 'invalid' || custom.kind === 'invalid' || namespaced.kind === 'invalid') {
-      return { kind: 'invalid' };
-    }
-    const merged = this.mergeInstallations(main, custom, namespaced).installations;
-    const record = this.recordForLookup(merged, ghostId);
-    if (record) return { kind: 'found', record };
-    if (
-      rawMentionsGhost(main, ghostId) ||
-      rawMentionsGhost(custom, ghostId) ||
-      rawMentionsGhost(namespaced, ghostId)
-    ) {
-      return { kind: 'invalid' };
-    }
-    return { kind: 'absent' };
+    target: string | PluginMarketAuthorizationTarget,
+    namespace?: string | null,
+  ): PluginMarketAuthorizationLookup {
+    return this.lookupInstallationForAuthorization(typeof target === 'string'
+      ? { ghostId: target, ...(namespace !== undefined ? { namespace } : {}) }
+      : target);
   }
 
   upsertInstallation(record: PluginMarketInstallationRecord): void {

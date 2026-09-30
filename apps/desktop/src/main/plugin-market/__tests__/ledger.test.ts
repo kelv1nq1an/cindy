@@ -7,8 +7,13 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   NS_LEDGER_FILE,
   PluginMarketLedger,
+  ghostManifestDigest,
   type PluginMarketInstallationRecord,
 } from '../ledger';
+import { loadGhostFirstPartyFactsLoader } from '../../cindy-brain/ghostFirstPartyFacts';
+import { authorizeGhostTokenBroker } from '../../cindy-brain/ghostFirstPartyPrivilege';
+import { loadConnectionAudienceResolver } from '../../cindy-brain/connectionAudienceResolver';
+import type { GhostManifest } from '../../../shared/ghost';
 
 const roots: string[] = [];
 
@@ -42,6 +47,94 @@ function record(
 }
 
 describe('PluginMarketLedger', () => {
+  it.each([false, true])('does not authorize a known root through an org sibling with a root tombstone=%s', (tombstone) => {
+    const { ledger } = harness();
+    ledger.upsertInstallation(record({ ghostId: 'helper', namespace: 'acme', scope: 'organization', organizationId: 'org-1' }));
+    if (tombstone) ledger.upsertInstallation(record({ ghostId: 'helper', namespace: null, installed: false }));
+    const preciseRoot = ledger.lookupInstallationForAuthorization({ ghostId: 'helper', namespace: null });
+    expect(preciseRoot).toEqual(tombstone
+      ? { kind: 'found', record: expect.objectContaining({ namespace: null, installed: false }) }
+      : { kind: 'absent' });
+    expect(ledger.lookupInstallationForOidc('helper', null)).toEqual(preciseRoot);
+    expect(ledger.lookupInstallationForOidc({ ghostId: 'helper', namespace: null })).toEqual(preciseRoot);
+    expect(ledger.lookupInstallationForAuthorization({ ghostId: 'helper', namespace: 'acme' })).toMatchObject({ kind: 'found', record: { namespace: 'acme' } });
+    expect(ledger.lookupInstallationForAuthorization({ ghostId: 'helper', namespace: 'other' })).toEqual({ kind: 'absent' });
+    expect(ledger.lookupInstallationForAuthorization({ ghostId: 'helper' })).toMatchObject({ kind: 'found', record: { namespace: 'acme' } });
+  });
+
+  it('resolves an old unnamespaced organization row only for a pending target, not known root', () => {
+    const { ledger } = harness();
+    ledger.upsertInstallation(record({ ghostId: 'helper', scope: 'organization', organizationId: 'org-1' }));
+    expect(ledger.lookupInstallationForAuthorization({ ghostId: 'helper', namespace: null })).toEqual({ kind: 'absent' });
+    expect(ledger.lookupInstallationForAuthorization({ ghostId: 'helper' })).toMatchObject({ kind: 'found' });
+  });
+
+  it('keeps precise authorization fail-closed for malformed records and files', () => {
+    const { filePath, ledger } = harness();
+    ledger.upsertInstallation(record({ ghostId: 'helper', namespace: null }));
+    const raw = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    raw.installations.helper.sha256 = 42;
+    fs.writeFileSync(filePath, JSON.stringify(raw));
+    const target = { ghostId: 'helper', namespace: null };
+    expect(ledger.lookupInstallationForAuthorization(target)).toEqual({ kind: 'invalid' });
+    expect(ledger.lookupInstallationForOidc(target)).toEqual({ kind: 'invalid' });
+    expect(() => ledger.installationForAuthorization(target)).toThrow(/unreadable/);
+    fs.writeFileSync(filePath, '{');
+    expect(ledger.lookupInstallationForOidc(target)).toEqual({ kind: 'invalid' });
+  });
+
+  it('does not grant enterprise Broker or OIDC to a known root copied from identical org package bytes', () => {
+    const { ledger } = harness();
+    const manifest: GhostManifest = {
+      schemaVersion: 2, id: 'helper', name: 'Helper', version: '1.0.0', kind: 'chip', entry: 'main.js',
+      network: { hosts: ['service.test'], secrets: [{
+        key: 'identity', label: 'Identity', source: 'oidc-token',
+        inject: { header: 'Authorization', hosts: ['service.test'], format: 'Bearer {value}' },
+      }] },
+    };
+    const packageSha256 = 'a'.repeat(64);
+    const manifestDigest = ghostManifestDigest(manifest);
+    ledger.upsertInstallation(record({ ghostId: 'helper', namespace: 'acme', scope: 'organization',
+      organizationId: 'org-1', sha256: packageSha256, manifestDigest, rawManifestSha256: manifestDigest }));
+    const identity = { membershipId: 'member-1', membershipKind: 'org' as const, orgId: 'org-1', orgSlug: 'acme' };
+    for (const namespace of [null, 'acme']) {
+      const target = { ghostId: 'helper', namespace };
+      const factsLoader = loadGhostFirstPartyFactsLoader({
+        readInstalledBuiltin: () => false, readInstallOrigin: () => 'manual',
+        readInstallNamespace: () => namespace, readApprovedPackageSha256: () => packageSha256,
+        readMarketInstallation: () => ledger.installationForAuthorization(target),
+        lookupOrganizationPrefix: () => ({ kind: 'known', pluginPrefix: 'acme' }),
+      });
+      expect(authorizeGhostTokenBroker('helper', factsLoader.load('helper', 'runtime', identity))).toBe(namespace !== null);
+      const resolver = loadConnectionAudienceResolver({
+        readInstalledManifestIdentity: () => ({ manifest, rawManifestSha256: manifestDigest,
+          legacyManifestDigest: manifestDigest, legacyManifestDigests: [manifestDigest] }),
+        readApprovedPackageSha256: () => packageSha256, readInstallNamespace: () => namespace,
+        readMarketInstallation: () => ledger.lookupInstallationForOidc(target),
+      });
+      expect(resolver.resolve('helper', identity) !== null).toBe(namespace !== null);
+    }
+  });
+  it('never falls back from an explicit root uninstall to a same-id organization sibling', () => {
+    const { ledger } = harness();
+    ledger.upsertInstallation(record({ namespace: 'acme', scope: 'organization', organizationId: 'org-1' }));
+    expect(ledger.installationForLocalUninstall({ ghostId: 'cindy-test', namespace: null })).toBeNull();
+    expect(ledger.installationForLocalUninstall({ ghostId: 'cindy-test', namespace: 'acme' })).toMatchObject({ namespace: 'acme' });
+    ledger.upsertInstallation(record({ namespace: null, installed: false }));
+    expect(ledger.installationForLocalUninstall({ ghostId: 'cindy-test', namespace: null })).toBeNull();
+  });
+
+  it('retires only the unchanged provenance captured for local uninstall', () => {
+    const { ledger } = harness();
+    const original = record({ namespace: null });
+    ledger.upsertInstallation(original);
+    const replacement = record({ namespace: null, source: 'local-market', sourceKey: 'new-source' });
+    ledger.upsertInstallation(replacement);
+    ledger.markRemovedRecordIfUnchanged(original, 'user-1');
+    expect(ledger.installationForGhost('cindy-test')).toMatchObject({ installed: true, sourceKey: 'new-source' });
+    ledger.markRemovedRecordIfUnchanged(replacement, 'user-1');
+    expect(ledger.installationForGhost('cindy-test')).toMatchObject({ installed: false });
+  });
   it('writes provenance atomically and reads it back', () => {
     const { filePath, ledger } = harness();
     ledger.upsertInstallation(record({

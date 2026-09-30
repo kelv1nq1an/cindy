@@ -1,4 +1,5 @@
-import { GHOST_PARTITION_PREFIX, parseGhostPartition } from '../../shared/ghost.js';
+import { createHash } from 'node:crypto';
+import { GHOST_PARTITION_PREFIX, ghostInstallApprovalToken, parseGhostPartition, type GhostInstallApproval } from '../../shared/ghost.js';
 import { installedGhostLogicalIdentity, isValidPluginStoragePart, pluginStoragePart } from '../../shared/pluginIdentity.js';
 import { dataOwnerStorageKey, type ActiveAppSession } from '../appSessionState.js';
 
@@ -20,14 +21,19 @@ export function ownerScopedGhostPartition(
 }
 
 export function ownerScopedGhostPartitionForInstalledGhost(
-  ghost: { manifest: { id: string }; namespace?: string | null },
-  owner: Pick<ActiveAppSession, 'mode' | 'dataOwnerId'>,
+  ghost: { manifest: { id: string }; namespace?: string | null; approval?: GhostInstallApproval; dir?: string },
+  owner: Pick<ActiveAppSession, 'mode' | 'dataOwnerId'> & Partial<Pick<ActiveAppSession, 'generation'>>,
 ): string | null {
-  return ownerScopedGhostPartition(
+  const partition = ownerScopedGhostPartition(
     pluginStoragePart(installedGhostLogicalIdentity(ghost)),
     owner,
     ghost.namespace === null,
   );
+  if (!partition || ghost.approval?.state !== 'approved') return partition;
+  const receipt = createHash('sha256')
+    .update(JSON.stringify([ghostInstallApprovalToken(ghost.approval), ghost.dir ?? null, owner.generation ?? null]))
+    .digest('hex');
+  return partition + ':receipt:' + receipt;
 }
 
 /**

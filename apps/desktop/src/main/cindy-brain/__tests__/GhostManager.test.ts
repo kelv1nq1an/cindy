@@ -5093,6 +5093,281 @@ describe('GhostManager · update(原位换版)', () => {
     expect(fs.existsSync(path.join(rootDir, 'hello', 'new.txt'))).toBe(false);
   });
 
+  it('archives source state before package side effects and leaves the replacement with empty state', async () => {
+    const archiveId = '_ns__cindy-archive-00000000-0000-4000-8000-000000000002__hello';
+    const state = new Map([['hello', 'old-credentials-and-data']]);
+    const archive = vi.fn(async (fromPart: string, archivePart: string) => {
+      if (!state.has(fromPart)) return;
+      state.set(archivePart, state.get(fromPart)!);
+      state.delete(fromPart);
+    });
+    manager = new GhostManager({
+      getRootDir: () => rootDir,
+      onArchiveSourceState: archive,
+      mutateSnapshot: async ({ parentDir, ...request }) => {
+        await runGhostSnapshotWorkerRequest(request, parentDir);
+      },
+    });
+    await manager.install(await makeCindy('v1.cindy', goodManifest()));
+    const result = await manager.update(await makeCindy('v2.cindy', { ...goodManifest(), version: '2.0.0' }), {
+      expectedInstalledApproval: ghostInstallApprovalToken(manager.list()[0]?.approval),
+      sourceStateArchiveId: archiveId,
+      beforePackageCommit: () => {
+        expect(state.has('hello')).toBe(false);
+        const store = new GhostInstallReceiptStore(() => path.join(workDir, 'ghosts-install-state'));
+        expect(store.readPendingMutationSync('hello')).toMatchObject({
+          state: 'valid', mutation: { sourceStateArchiveId: archiveId },
+        });
+      },
+    });
+    expect(result).toMatchObject({ ghost: { manifest: { version: '2.0.0' } } });
+    expect(archive).toHaveBeenCalledWith('hello', archiveId);
+    expect(state.has('hello')).toBe(false);
+    expect(state.get(archiveId)).toBe('old-credentials-and-data');
+  });
+
+  it('restores archived source state before compensating side effects on receipt failure', async () => {
+    const archiveId = '_ns__cindy-archive-00000000-0000-4000-8000-000000000002__hello';
+    const state = new Map([['hello', 'old-data']]);
+    manager = new GhostManager({
+      getRootDir: () => rootDir,
+      onArchiveSourceState: async (fromPart, archivePart) => {
+        if (!state.has(fromPart)) return;
+        state.set(archivePart, state.get(fromPart)!);
+        state.delete(fromPart);
+      },
+      mutateSnapshot: async ({ parentDir, ...request }) => {
+        await runGhostSnapshotWorkerRequest(request, parentDir);
+      },
+    });
+    await manager.install(await makeCindy('v1.cindy', goodManifest()));
+    const store = (manager as unknown as { receiptStore: GhostInstallReceiptStore }).receiptStore;
+    const rollback = vi.fn(() => { expect(state.get('hello')).toBe('old-data'); });
+    const write = vi.spyOn(store, 'write').mockRejectedValueOnce(new Error('receipt blocked'));
+    const result = await manager.update(await makeCindy('v2.cindy', { ...goodManifest(), version: '2.0.0' }), {
+      expectedInstalledApproval: ghostInstallApprovalToken(manager.list()[0]?.approval),
+      sourceStateArchiveId: archiveId,
+      beforePackageCommit: () => ({ rollback, commit: vi.fn() }),
+    });
+    write.mockRestore();
+    expect(result).toMatchObject({ rejection: { code: 'io' } });
+    expect(rollback).toHaveBeenCalledOnce();
+    expect(state.get('hello')).toBe('old-data');
+    expect(state.has(archiveId)).toBe(false);
+    expect(manager.list()[0]?.manifest.version).toBe('1.0.0');
+    expect(store.readPendingMutationSync('hello').state).toBe('missing');
+  });
+
+  it('retains the archive journal and quarantine after rollback failure until asynchronous recovery finishes', async () => {
+    const archiveId = '_ns__cindy-archive-00000000-0000-4000-8000-000000000002__hello';
+    const state = new Map([['hello', 'old-data']]);
+    const move = (fromPart: string, archivePart: string) => {
+      if (!state.has(fromPart)) return;
+      state.set(archivePart, state.get(fromPart)!);
+      state.delete(fromPart);
+    };
+    manager = new GhostManager({
+      getRootDir: () => rootDir,
+      onArchiveSourceState: async (fromPart, archivePart) => {
+        if (fromPart === archiveId) throw new Error('rollback blocked');
+        move(fromPart, archivePart);
+      },
+      mutateSnapshot: async ({ parentDir, ...request }) => {
+        await runGhostSnapshotWorkerRequest(request, parentDir);
+      },
+    });
+    await manager.install(await makeCindy('v1.cindy', goodManifest()));
+    const store = (manager as unknown as { receiptStore: GhostInstallReceiptStore }).receiptStore;
+    const write = vi.spyOn(store, 'write').mockRejectedValueOnce(new Error('receipt blocked'));
+    const result = await manager.update(await makeCindy('v2.cindy', { ...goodManifest(), version: '2.0.0' }), {
+      expectedInstalledApproval: ghostInstallApprovalToken(manager.list()[0]?.approval),
+      sourceStateArchiveId: archiveId,
+    });
+    write.mockRestore();
+    expect(result).toMatchObject({ rejection: { code: 'io', rollbackFailed: true } });
+    expect(manager.list()[0]?.approval.state).toBe('invalid');
+    let finishRecovery!: () => void;
+    const recoveryGate = new Promise<void>((resolve) => { finishRecovery = resolve; });
+    const recovered = new GhostManager({
+      getRootDir: () => rootDir,
+      onArchiveSourceState: async (fromPart, archivePart) => {
+        expect(fromPart).toBe(archiveId);
+        expect(archivePart).toBe('hello');
+        await recoveryGate;
+        move(fromPart, archivePart);
+      },
+    });
+    expect(recovered.list()[0]?.approval.state).toBe('invalid');
+    expect(store.readPendingMutationSync('hello').state).toBe('valid');
+    finishRecovery();
+    await recovered.retryInterruptedMutationsAfterDbReady();
+    expect(recovered.list()[0]?.manifest.version).toBe('1.0.0');
+    expect(recovered.list()[0]?.approval.state).toBe('approved');
+    expect(state.get('hello')).toBe('old-data');
+    expect(state.has(archiveId)).toBe(false);
+    expect(store.readPendingMutationSync('hello').state).toBe('missing');
+  });
+
+  it('recovers a committed source archive journal before allowing the new runtime', async () => {
+    const archiveId = '_ns__cindy-archive-00000000-0000-4000-8000-000000000002__hello';
+    const state = new Map([['hello', 'old-data']]);
+    const archive = vi.fn(async (fromPart: string, toPart: string) => {
+      if (!state.has(fromPart)) return;
+      state.set(toPart, state.get(fromPart)!);
+      state.delete(fromPart);
+    });
+    manager = new GhostManager({ getRootDir: () => rootDir, onArchiveSourceState: archive,
+      mutateSnapshot: async ({ parentDir, ...request }) => {
+        await runGhostSnapshotWorkerRequest(request, parentDir);
+      },
+    });
+    await manager.install(await makeCindy('v1.cindy', goodManifest()));
+    const store = (manager as unknown as { receiptStore: GhostInstallReceiptStore }).receiptStore;
+    const clear = vi.spyOn(store, 'clearPendingMutation').mockRejectedValueOnce(new Error('clear blocked'));
+    const result = await manager.update(await makeCindy('v2.cindy', { ...goodManifest(), version: '2.0.0' }), {
+      expectedInstalledApproval: ghostInstallApprovalToken(manager.list()[0]?.approval),
+      sourceStateArchiveId: archiveId,
+    });
+    clear.mockRestore();
+    expect(result).toMatchObject({ ghost: { approval: { state: 'invalid' } } });
+    let finishRecovery!: () => void;
+    const gate = new Promise<void>((resolve) => { finishRecovery = resolve; });
+    const recovered = new GhostManager({ getRootDir: () => rootDir,
+      onArchiveSourceState: async (fromPart, toPart) => {
+        expect([fromPart, toPart]).toEqual(['hello', archiveId]);
+        await gate;
+        await archive(fromPart, toPart);
+      },
+    });
+    expect(recovered.list()[0]?.approval.state).toBe('invalid');
+    finishRecovery();
+    await recovered.retryInterruptedMutationsAfterDbReady();
+    expect(recovered.list()[0]).toMatchObject({ manifest: { version: '2.0.0' }, approval: { state: 'approved' } });
+    expect(state.get(archiveId)).toBe('old-data');
+    expect(state.has('hello')).toBe(false);
+    expect(store.readPendingMutationSync('hello').state).toBe('missing');
+  });
+
+  it('retains partial source archive failure until inverse recovery proves restoration', async () => {
+    const archiveId = '_ns__cindy-archive-00000000-0000-4000-8000-000000000002__hello';
+    const state = new Map([['hello', 'secret']]);
+    const archive = vi.fn(async (fromPart: string, toPart: string) => {
+      state.set(toPart, state.get(fromPart)!);
+      state.delete(fromPart);
+      throw new Error('other data path blocked');
+    });
+    manager = new GhostManager({ getRootDir: () => rootDir, onArchiveSourceState: archive,
+      mutateSnapshot: async ({ parentDir, ...request }) => {
+        await runGhostSnapshotWorkerRequest(request, parentDir);
+      },
+    });
+    await manager.install(await makeCindy('v1.cindy', goodManifest()));
+    const beforeCommit = vi.fn();
+    const result = await manager.update(await makeCindy('v2.cindy', { ...goodManifest(), version: '2.0.0' }), {
+      expectedInstalledApproval: ghostInstallApprovalToken(manager.list()[0]?.approval),
+      sourceStateArchiveId: archiveId, beforePackageCommit: beforeCommit,
+    });
+    expect(result).toMatchObject({ rejection: { rollbackFailed: true } });
+    expect(archive).toHaveBeenCalledTimes(1);
+    expect(beforeCommit).not.toHaveBeenCalled();
+    expect(manager.list()[0]?.approval.state).toBe('invalid');
+    const recovered = new GhostManager({ getRootDir: () => rootDir,
+      onArchiveSourceState: async (fromPart, toPart) => {
+        expect([fromPart, toPart]).toEqual([archiveId, 'hello']);
+        if (!state.has(fromPart)) return;
+        state.set(toPart, state.get(fromPart)!);
+        state.delete(fromPart);
+      },
+    });
+    await recovered.retryInterruptedMutationsAfterDbReady();
+    expect(recovered.list()[0]).toMatchObject({ manifest: { version: '1.0.0' }, approval: { state: 'approved' } });
+    expect(state.get('hello')).toBe('secret');
+  });
+
+  it('serializes source archive recovery before uninstall and reinstall', async () => {
+    const archiveId = '_ns__cindy-archive-00000000-0000-4000-8000-000000000002__hello';
+    manager = new GhostManager({ getRootDir: () => rootDir,
+      onArchiveSourceState: async () => { throw new Error('partial archive blocked'); },
+      mutateSnapshot: async ({ parentDir, ...request }) => runGhostSnapshotWorkerRequest(request, parentDir),
+    });
+    await manager.install(await makeCindy('v1.cindy', goodManifest()));
+    await manager.update(await makeCindy('v2.cindy', { ...goodManifest(), version: '2.0.0' }), {
+      expectedInstalledApproval: ghostInstallApprovalToken(manager.list()[0]?.approval),
+      sourceStateArchiveId: archiveId,
+    });
+    const nextPackage = await makeCindy('v3.cindy', { ...goodManifest(), version: '3.0.0' });
+    let finishRecovery!: () => void;
+    let recoveryStarted!: () => void;
+    const gate = new Promise<void>((resolve) => { finishRecovery = resolve; });
+    const started = new Promise<void>((resolve) => { recoveryStarted = resolve; });
+    const recovered = new GhostManager({ getRootDir: () => rootDir,
+      onArchiveSourceState: async () => { recoveryStarted(); await gate; },
+      mutateSnapshot: async ({ parentDir, ...request }) => runGhostSnapshotWorkerRequest(request, parentDir),
+    });
+    await started;
+    let uninstallFinished = false;
+    const replacement = recovered.uninstall('hello').then(async () => {
+      uninstallFinished = true;
+      return recovered.install(nextPackage);
+    });
+    await new Promise<void>((resolve) => setTimeout(resolve, 100));
+    const finishedWhilePaused = uninstallFinished;
+    finishRecovery();
+    await replacement;
+    await recovered.retryInterruptedMutationsAfterDbReady();
+    expect(finishedWhilePaused).toBe(false);
+    expect(recovered.list()[0]).toMatchObject({ manifest: { version: '3.0.0' }, approval: { state: 'approved' } });
+  });
+
+  it.each(['journal', 'receipt'] as const)('preserves superseding %s during source archive recovery', async (superseded) => {
+    const archiveId = '_ns__cindy-archive-00000000-0000-4000-8000-000000000002__hello';
+    manager = new GhostManager({ getRootDir: () => rootDir,
+      onArchiveSourceState: async () => {},
+      mutateSnapshot: async ({ parentDir, ...request }) => runGhostSnapshotWorkerRequest(request, parentDir),
+    });
+    await manager.install(await makeCindy('v1.cindy', goodManifest()));
+    const store = (manager as unknown as { receiptStore: GhostInstallReceiptStore }).receiptStore;
+    const clear = vi.spyOn(store, 'clearPendingMutation').mockRejectedValueOnce(new Error('clear blocked'));
+    await manager.update(await makeCindy('v2.cindy', { ...goodManifest(), version: '2.0.0' }), {
+      expectedInstalledApproval: ghostInstallApprovalToken(manager.list()[0]?.approval), sourceStateArchiveId: archiveId,
+    });
+    clear.mockRestore();
+    let finishRecovery!: () => void;
+    let recoveryStarted!: () => void;
+    const gate = new Promise<void>((resolve) => { finishRecovery = resolve; });
+    const started = new Promise<void>((resolve) => { recoveryStarted = resolve; });
+    const recovered = new GhostManager({ getRootDir: () => rootDir,
+      onArchiveSourceState: async () => { recoveryStarted(); await gate; },
+    });
+    await started;
+    const originalMarker = store.readPendingMutationSync('hello');
+    if (superseded === 'journal') {
+      await store.writePendingMutation('hello', { kind: 'uninstall' });
+    } else {
+      const receiptPath = path.join(workDir, 'ghosts-install-state', 'hello.json');
+      const receipt = JSON.parse(fs.readFileSync(receiptPath, 'utf8'));
+      fs.writeFileSync(receiptPath, JSON.stringify({ ...receipt, revision: crypto.randomUUID() }));
+    }
+    const recoveries = [...(recovered as unknown as { pendingRecoverySideEffects: Set<Promise<void>> }).pendingRecoverySideEffects];
+    finishRecovery();
+    await Promise.all(recoveries);
+    expect(store.readPendingMutationSync('hello')).toEqual(superseded === 'journal'
+      ? expect.objectContaining({ state: 'valid', mutation: expect.objectContaining({ kind: 'uninstall' }) })
+      : originalMarker);
+    expect(recovered.list()[0]?.approval.state).toBe('invalid');
+  });
+
+  it('writes manual origin instead of retaining a previous Forge authorization', async () => {
+    await manager.install(await makeCindy('v1.cindy', goodManifest()), { installOrigin: 'agent-forge' });
+    expect(manager.readApprovedInstallOriginStrict('hello')).toBe('agent-forge');
+    await manager.update(await makeCindy('v2.cindy', { ...goodManifest(), version: '2.0.0' }), {
+      expectedInstalledApproval: ghostInstallApprovalToken(manager.list()[0]?.approval), installOrigin: 'manual',
+    });
+    expect(manager.readApprovedInstallOriginStrict('hello')).toBe('manual');
+    expect(JSON.parse(fs.readFileSync(path.join(workDir, 'ghosts-install-state', 'hello.json'), 'utf8')))
+      .toMatchObject({ installOrigin: 'manual' });
+  });
+
   it('receipt 提交失败时补偿副作用并恢复旧版本', async () => {
     await manager.install(await makeCindy('v1.cindy', goodManifest(), { 'old.txt': 'v1' }));
     const rollback = vi.fn();

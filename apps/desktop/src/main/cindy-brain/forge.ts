@@ -3231,10 +3231,11 @@ identity.displayTemplate 时,\`/oauth\` 回查与连接结果里 account.label �
   Google 这类允许任意 loopback 端口的服务商不用声明。
 - \`tokenBroker\`:资格有三路:①随包官方种子或受信任公开市场的官方插件,名称本身不构成资格；②当前组织的服务端
   organization market 包已安装、source 为 \`market\`、organizationId 与当前组织一致,
-  id 命中本组织已登记前缀,且 release sha256 与批准 receipt 的 packageSha256 相等。
-  ③企业作者通过 \`ghost_forge_install\` 明确安装，且 id 命中当前组织已登记前缀；是否已有
-  同 id 市场记录不影响这条自测路径。后两路不接受个人身份或别的组织前缀，且只给 Broker
-  与 oidc-token，不给宿主原语；手动导入不属于 Forge 路径。
+  namespace 与当前组织的可信身份一致，且 release sha256 与批准 receipt 的 packageSha256 相等。
+  ③企业作者通过 \`ghost_forge_install\` 明确安装，Host 绑定当前组织 namespace；只有真实
+  存量待迁移安装仍使用本组织已登记前缀核对。是否已有同 id 市场记录不影响这条自测路径。
+  后两路不接受个人身份或别的组织身份；Forge 只给 Broker 与 oidc-token，不给宿主原语，
+  可信 XD 企业市场安装的宿主能力另按可信组织身份核验，不依赖名称前缀。手动导入不属于 Forge 路径。
   code/refresh 交换改经 Cindy 服务端 broker 完成,client secret 由服务端持有、不随包
   分发,且要求用户已登录 Cindy。声明它时必须同时声明 redirectPort,并与 clientSecret
   互斥;PKCE 缺省开(verifier
@@ -4754,7 +4755,8 @@ Cindy 统一归类、随机选择与排序，同批每个场景和每个插件�
    产生的确切包：首次安装、以及权限比已装版本变多的更新，会先在任务里弹确认卡列出权限，
    用户允许后才落位；用户拒绝返回 \`MUTATION_CANCELLED\`，不要重试，除非用户再次要求。
    首次安装会启用，同 id 已安装时原位更新并保留启用状态、配置、
-   数据与面板位置，同版本也可覆盖。不要因为 scaffold 或 pack 成功就自动调用本工具。
+   数据与面板位置，同版本也可覆盖。同来源更新延续旧数据；从市场等不同来源切换到 Forge
+   时旧账号、密钥及数据隔离保留，新来源需要重新连接。不要因为 scaffold 或 pack 成功就自动调用本工具。
    企业身份下若清单声明 \`source:"oidc-token"\`，提交安装前会展示插件名、id 与精确请求
    域名，并要求用户手输相同 id；取消不会安装。个人与企业身份下的明确 Forge 安装都会标记为
    作者本地自测并受组织默认插件自动接管保护；但 Connection JWT 资格仍只来自当前企业身份、
@@ -4836,7 +4838,9 @@ Cindy 统一归类、随机选择与排序，同批每个场景和每个插件�
 - agent 详单格式错(background / errand / schedule 存在但不是 true；基础点击触发请写 \`agent: {}\`)
 - node 详单格式错(entry 不是包内 CommonJS .js/.cjs、protocol 不在 json-rpc-stdio / mcp-stdio、
   resident 又写 idleTimeoutSeconds)；未知 command/args/shell/env 只保留，不传给进程启动器
-- id 用了 \`cindy-\` / \`filo-\` / \`xd-\` 前缀(官方保留,正式版用户通道拒装;给自己的意识换个前缀)
+- id 用了 \`cindy-\` 前缀(平台保留,正式版用户通道拒装)。\`filo-\` / \`xd-\` 只是普通名称，不授予官方资格
+- ghost.json 声明了 namespace(包括 null)。namespace 由可信交付及 Host 安装事实决定，作者不能自报
+- 企业发布遵循当前服务端准入。S1 或 S2 尚未开启时仍保留旧认领和前缀命名流程，不能把收到 namespace 当作自由命名已开放
 - network 详单格式错(hosts 缺失/裸 TLD/IP/带端口/通配不在最左、secret 缺 inject、
   inject.format 没有 {value} 占位、inject.header 用了 Host/Cookie 等协议关键头、
   inject.hosts 不是 hosts 声明条目的子集、

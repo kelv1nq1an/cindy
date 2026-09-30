@@ -1557,6 +1557,7 @@ describe('PluginMarketService migration and defaultInstall', () => {
       items: [{ installState: 'installed', enabled: true }],
     });
     expect(runtime.install.mock.calls[0]?.[1]).not.toHaveProperty('manifestCap');
+    expect(runtime.install.mock.calls[0]?.[1]).not.toHaveProperty('sourceChanged');
   });
 
   it('returns a Renderer snapshot before a default install download finishes', async () => {
@@ -1683,6 +1684,10 @@ describe('PluginMarketService migration and defaultInstall', () => {
       version: '1.0.0',
       consent: { mode: 'confirmed', key: expect.any(String) },
       afterCommitInLock: expect.any(Function),
+      pendingMarketRecord: {
+        scope: 'public', organizationId: null, source: 'market', installed: true,
+        sha256: item.currentRelease.sha256,
+      },
     });
   });
 
@@ -1810,16 +1815,22 @@ describe('PluginMarketService migration and defaultInstall', () => {
       version: '1.0.0',
       consent: { mode: 'confirmed', key: expect.any(String) },
       afterCommitInLock: expect.any(Function),
+      pendingMarketRecord: {
+        scope: 'public', organizationId: null, source: 'market', installed: true,
+        sha256: item.currentRelease.sha256,
+      },
     });
     // 安装入口用目录 summary 做 detail 身份绑定(防止把 A 的确认导向 B 的内容),
     // 因此手动安装也会先取一次目录,但不做任何 listAll 之外的多余请求。
     expect(h.api.listAll).toHaveBeenCalledTimes(1);
     // 锁定装完即开的最终结果:装入入口返回的 ghost 必须是启用态。
     expect(ghost?.enabled).toBe(true);
-    expect(runtime.install.mock.calls[0]?.[1]).not.toHaveProperty('pendingMarketRecord');
+    expect(runtime.install.mock.calls[0]?.[1]?.pendingMarketRecord).toMatchObject({
+      scope: 'public', organizationId: null, source: 'market', sha256: item.currentRelease.sha256,
+    });
   });
 
-  it('passes a Host-built pendingMarketRecord only for organization server-market packages', async () => {
+  it('passes a Host-built pendingMarketRecord for all server-market scopes', async () => {
     const orgItem = summary({
       ghostId: 'acme-tool',
       scope: 'organization',
@@ -1871,7 +1882,9 @@ describe('PluginMarketService migration and defaultInstall', () => {
     });
     const publicHarness = harness([publicItem]);
     await publicHarness.service.install(publicItem.id, reviewedInstallOptions(publicItem), TEST_INSTALL_CONTEXT);
-    expect(runtime.install.mock.calls[0]?.[1]).not.toHaveProperty('pendingMarketRecord');
+    expect(runtime.install.mock.calls[0]?.[1]?.pendingMarketRecord).toMatchObject({
+      scope: 'public', organizationId: null, source: 'market', sha256: publicItem.currentRelease.sha256,
+    });
 
     runtime.install.mockReset();
     const personalItem = summary({ scope: 'personal', organizationId: null });
@@ -1882,7 +1895,9 @@ describe('PluginMarketService migration and defaultInstall', () => {
     });
     const personalHarness = harness([personalItem]);
     await personalHarness.service.install(personalItem.id, reviewedInstallOptions(personalItem), TEST_INSTALL_CONTEXT);
-    expect(runtime.install.mock.calls[0]?.[1]).not.toHaveProperty('pendingMarketRecord');
+    expect(runtime.install.mock.calls[0]?.[1]?.pendingMarketRecord).toMatchObject({
+      scope: 'personal', organizationId: null, source: 'market', sha256: personalItem.currentRelease.sha256,
+    });
   });
 
   it('manual market install accepts the normalized setup manifest returned by detail', async () => {
@@ -1959,6 +1974,10 @@ describe('PluginMarketService migration and defaultInstall', () => {
       version: '1.0.0',
       consent: { mode: 'confirmed', key: expect.any(String) },
       afterCommitInLock: expect.any(Function),
+      pendingMarketRecord: {
+        scope: 'public', organizationId: null, source: 'market', installed: true,
+        sha256: ordinary.currentRelease.sha256,
+      },
     });
   });
 
@@ -3537,10 +3556,47 @@ describe('PluginMarketService migration and defaultInstall', () => {
     expect(h.ledger.isDefaultInstallSuppressed('user-1', item.id)).toBe(false);
   });
 
+  it.each([false, true])('does not track an unowned root uninstall through an org sibling (root tombstone: %s)', async (tombstone) => {
+    const item = summary({ ghostId: 'helper', namespace: 'acme', scope: 'organization', organizationId: 'org-1' });
+    const h = harness([item]);
+    h.ledger.upsertInstallation(recordForTest(item, { namespace: 'acme' }));
+    if (tombstone) {
+      h.ledger.upsertInstallation(recordForTest(summary({ ghostId: 'helper' }), { namespace: null, installed: false }));
+    }
+    installRuntimeGhost({ ...manifest('helper'), namespace: undefined });
+    runtime.ghosts[0]!.namespace = null;
+    expect(h.service.prepareLocalUninstallTracking('helper')).toBeNull();
+    expect(h.ledger.installationForPlugin({ ghostId: 'helper', namespace: 'acme' })?.installed).toBe(true);
+    expect(h.ledger.isDefaultInstallSuppressed('user-1', item.id)).toBe(false);
+  });
+
+  it('does not track a local replacement with a stale provenance digest', () => {
+    const item = summary();
+    const h = harness([item]);
+    h.ledger.upsertInstallation(recordForTest(item, { manifestDigest: 'f'.repeat(64) }));
+    installRuntimeGhost(manifest(item.ghostId));
+    expect(h.service.prepareLocalUninstallTracking(item.ghostId)).toBeNull();
+    expect(h.ledger.installationForGhost(item.ghostId)?.installed).toBe(true);
+  });
+
+  it('does not retire a replacement route after local uninstall tracking was prepared', async () => {
+    const item = summary();
+    const h = harness([item]);
+    installRuntimeGhost(manifest(item.ghostId));
+    h.ledger.upsertInstallation(recordForTest(item, { manifestDigest: ghostManifestDigest(manifest(item.ghostId)) }));
+    const complete = h.service.prepareLocalUninstallTracking(item.ghostId);
+    expect(complete).not.toBeNull();
+    h.ledger.upsertInstallation(recordForTest(item, { pluginId: 'replacement-resource', source: 'local-market', sourceKey: 'replacement' }));
+    await complete?.();
+    expect(h.ledger.installationForGhost(item.ghostId)).toMatchObject({ pluginId: 'replacement-resource', installed: true });
+    expect(h.ledger.isDefaultInstallSuppressed('user-1', 'replacement-resource')).toBe(false);
+  });
+
   it('records an opt-out only after a tracked local uninstall succeeds', async () => {
     const item = summary({ defaultInstall: true });
     const h = harness([item]);
     h.ledger.upsertInstallation(recordForTest(item));
+    installRuntimeGhost(manifest(item.ghostId));
 
     const complete = h.service.prepareLocalUninstallTracking(item.ghostId);
 
@@ -3574,7 +3630,7 @@ describe('PluginMarketService migration and defaultInstall', () => {
     const item = summary({ defaultInstall: true });
     const h = harness([item]);
     h.ledger.upsertInstallation(recordForTest(item));
-    runtime.ghosts = [ghostEntry(item.ghostId)];
+    installRuntimeGhost(manifest(item.ghostId));
     const completeLocalUninstall = h.service.prepareLocalUninstallTracking(item.ghostId);
     expect(completeLocalUninstall).not.toBeNull();
 
@@ -3612,6 +3668,7 @@ describe('PluginMarketService migration and defaultInstall', () => {
     const item = summary({ defaultInstall: true });
     const h = harness([item]);
     h.ledger.upsertInstallation(recordForTest(item));
+    installRuntimeGhost(manifest(item.ghostId));
 
     const complete = h.service.prepareLocalUninstallTracking(item.ghostId);
 
@@ -3625,6 +3682,7 @@ describe('PluginMarketService migration and defaultInstall', () => {
     const item = summary({ defaultInstall: true });
     const h = harness([item]);
     h.ledger.upsertInstallation(recordForTest(item));
+    installRuntimeGhost(manifest(item.ghostId));
     const complete = h.service.prepareLocalUninstallTracking(item.ghostId);
 
     runtime.session = {
@@ -3957,7 +4015,7 @@ describe('PluginMarketService migration and defaultInstall', () => {
     expect(h.ledger.installationForGhost('third-party')).toBeNull();
   });
 
-  it('allows explicit replacement when a removed market record has an existing directory', async () => {
+  it.each([false, true])('archives an explicit local-to-server replacement with a removed ledger row=%s', async (removedRecord) => {
     const item = summary();
     const installedDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cindy-local-installed-'));
     roots.push(installedDir);
@@ -3975,10 +4033,9 @@ describe('PluginMarketService migration and defaultInstall', () => {
       enabled: true,
     });
     const h = harness([item]);
-    h.ledger.upsertInstallation({
-      ...recordForTest(item),
-      installed: false,
-    });
+    if (removedRecord) {
+      h.ledger.upsertInstallation({ ...recordForTest(item), installed: false });
+    }
 
     await expect(
       h.service.install(item.id, {
@@ -3989,6 +4046,7 @@ describe('PluginMarketService migration and defaultInstall', () => {
       ghost: { manifest: { id: item.ghostId } },
     });
     expect(runtime.install.mock.calls[0]?.[1]).not.toHaveProperty('manifestCap');
+    expect(runtime.install.mock.calls[0]?.[1]).toHaveProperty('sourceChanged', true);
     expect(h.ledger.installationForGhost(item.ghostId)).toMatchObject({
       pluginId: item.id,
       source: 'market',
@@ -4396,6 +4454,44 @@ function installRuntimeGhost(
 }
 
 describe('organization default Plugin takeover', () => {
+  it.each([
+    ['S1 verified namespace without token slug', 'acme', 'acme', undefined, 'old-prefix', 'helper', true],
+    ['S2-off pending legacy prefix', undefined, undefined, undefined, 'acme', 'acme-tool', true],
+    ['pending legacy cannot guess a natural name', undefined, undefined, 'acme', 'acme', 'helper', false],
+    ['pending legacy cannot guess a namespace', undefined, 'acme', 'acme', 'acme', 'acme-tool', false],
+    ['known organization cannot select root', 'acme', null, 'acme', 'acme', 'acme-tool', false],
+    ['known organization cannot select pending legacy', 'acme', undefined, 'acme', 'acme', 'acme-tool', false],
+    ['known namespace rejects conflicting verified slug', 'acme', 'acme', 'other', 'acme', 'acme-tool', false],
+    ['organization default cannot have root identity', null, null, 'acme', 'acme', 'acme-tool', false],
+  ] as const)('uses verified identity instead of guessing: %s', (_name, namespace, installedNamespace, orgSlug, pluginPrefix, ghostId, eligible) => {
+    const item = organizationDefaultSummary({ ghostId, ...(namespace !== undefined ? { namespace } : {}) });
+    const installed = {
+      manifest: manifest(ghostId), dir: '/unused', enabled: true,
+      ...(installedNamespace !== undefined ? { namespace: installedNamespace } : {}),
+      approval: { state: 'approved', revision: '00000000-0000-4000-8000-000000000001' },
+      trust: { level: 'unverified', publisherSigned: false, publisherVerified: false, reviewed: false },
+    } satisfies InstalledGhost;
+    expect(organizationDefaultTakeoverEligibility({
+      summary: item, currentOrganization: { organizationId: 'org-1', pluginPrefix, ...(orgSlug ? { orgSlug } : {}) },
+      uniqueGhostId: true, installed, record: null, installOrigin: 'manual',
+      runtimeAvailable: true, optedOut: false, builtinRemoved: false, busy: false,
+    }).eligible).toBe(eligible);
+  });
+
+  it.each([null, 'old-prefix'])('allows verified natural namespace default takeover with prefix %s', (pluginPrefix) => {
+    const item = organizationDefaultSummary({ namespace: 'acme', ghostId: 'helper' });
+    const installed = {
+      manifest: manifest(item.ghostId), namespace: 'acme', dir: '/unused', enabled: true,
+      approval: { state: 'approved', revision: '00000000-0000-4000-8000-000000000001' },
+      trust: { level: 'unverified', publisherSigned: false, publisherVerified: false, reviewed: false },
+    } satisfies InstalledGhost;
+    expect(organizationDefaultTakeoverEligibility({
+      summary: item, currentOrganization: { organizationId: 'org-1', orgSlug: 'acme', pluginPrefix },
+      uniqueGhostId: false, installed, record: null, installOrigin: 'manual',
+      runtimeAvailable: true, optedOut: false, builtinRemoved: true, busy: false,
+    })).toEqual({ eligible: true });
+  });
+
   it('installs a namespaced organization default despite a root tombstone and public same-id listing', async () => {
     setCurrentOrganization();
     const item = organizationDefaultSummary({ namespace: 'acme' });
@@ -4446,6 +4542,7 @@ describe('organization default Plugin takeover', () => {
       manifestDigest: ghostManifestDigest(manifest(item.ghostId)),
     });
     runtime.install.mockImplementationOnce(async (_file, options) => {
+      expect(options.sourceChanged).toBe(true);
       options.beforeCommitInLock?.();
       expect(h.ledger.installationForGhost(item.ghostId)).toMatchObject({ installed: true });
       expect(h.ledger.isDefaultInstallSuppressed('user-1', item.id)).toBe(false);
@@ -4694,6 +4791,7 @@ describe('organization default Plugin takeover', () => {
     h.ledger.upsertInstallation(recordForTest(item));
     h.ledger.markRemoved(item.ghostId, null);
     runtime.install.mockImplementationOnce(async (_file, options) => {
+      expect(options.sourceChanged).toBe(true);
       options.beforeCommitInLock?.();
       const installed = { manifest: manifest(item.ghostId), dir, enabled: true };
       fs.writeFileSync(path.join(dir, 'ghost.json'), JSON.stringify(installed.manifest));

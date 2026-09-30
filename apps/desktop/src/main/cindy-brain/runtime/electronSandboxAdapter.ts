@@ -165,15 +165,16 @@ export function setGhostAgentModelsProvider(
  * adapter 反向依赖)。注入的是带"在装态守卫"的包装层——卸下后分区里
  * 残留的 fetch 不能复活写出新文件。
  */
-let ghostKvStore: {
+interface GhostKvProtocolStore {
   read(ghostId: string): Record<string, unknown>;
   write(ghostId: string, value: Record<string, unknown>): void;
-} | null = null;
+  captureTarget(ghostId: string): unknown;
+  isTargetCurrent(ghostId: string, expectedTarget: unknown): boolean;
+}
 
-export function setGhostKvStore(store: {
-  read(ghostId: string): Record<string, unknown>;
-  write(ghostId: string, value: Record<string, unknown>): void;
-}): void {
+let ghostKvStore: GhostKvProtocolStore | null = null;
+
+export function setGhostKvStore(store: GhostKvProtocolStore): void {
   ghostKvStore = store;
 }
 
@@ -186,6 +187,7 @@ type GhostSecretsProtocolHandler = (args: {
   method: string;
   pathname: string;
   readBodyText: () => Promise<string>;
+  isCurrent: () => boolean;
 }) => Promise<{ status: number; body?: string }>;
 
 let ghostSecretsHandler: GhostSecretsProtocolHandler | null = null;
@@ -204,6 +206,7 @@ type GhostOauthProtocolHandler = (args: {
   method: string;
   pathname: string;
   readBodyText: () => Promise<string>;
+  isCurrent: () => boolean;
 }) => Promise<{ status: number; body?: string }>;
 
 let ghostOauthHandler: GhostOauthProtocolHandler | null = null;
@@ -223,6 +226,7 @@ type GhostConnectionsProtocolHandler = (args: {
   method: string;
   pathname: string;
   readBodyText: () => Promise<string>;
+  isCurrent: () => boolean;
 }) => Promise<{ status: number; body?: string }>;
 
 let ghostConnectionsHandler: GhostConnectionsProtocolHandler | null = null;
@@ -236,11 +240,12 @@ const partitionRegistered = new Set<string>();
 const revokedPartitions = new Set<string>();
 const suspendedPartitions = new Set<string>();
 const partitionGhost = new Map<string, { dir: string; entry: string; storagePart: string }>();
-type GhostProtocolOwnerIdentity = Pick<ActiveAppSession, 'mode' | 'dataOwnerId'>;
+const partitionTargetGuard = new Map<string, () => boolean>();
+type GhostProtocolOwnerIdentity = Pick<ActiveAppSession, 'mode' | 'dataOwnerId' | 'generation'>;
 const partitionOwner = new Map<string, GhostProtocolOwnerIdentity>();
 
 function ghostProtocolOwnerSnapshot(owner: ActiveAppSession): GhostProtocolOwnerIdentity {
-  return { mode: owner.mode, dataOwnerId: owner.dataOwnerId };
+  return { mode: owner.mode, dataOwnerId: owner.dataOwnerId, generation: owner.generation };
 }
 
 function isSameGhostProtocolOwner(
@@ -251,7 +256,8 @@ function isSameGhostProtocolOwner(
 }
 
 function isGhostProtocolOwnerActive(owner: GhostProtocolOwnerIdentity): boolean {
-  return isSameGhostProtocolOwner(owner, getActiveAppSession());
+  const current = getActiveAppSession();
+  return isSameGhostProtocolOwner(owner, current) && owner.generation === current.generation;
 }
 
 /**
@@ -270,7 +276,11 @@ export function ensureGhostProtocolRegistered(
 
 export function revokeLegacyGhostProtocolPartition(ghostId: string): void {
   const partition = ownerScopedGhostPartition(ghostId, getActiveAppSession());
-  if (partition) revokedPartitions.add(partition);
+  if (!partition) return;
+  revokedPartitions.add(partition);
+  for (const registered of partitionRegistered) {
+    if (registered.startsWith(partition + ':receipt:')) revokedPartitions.add(registered);
+  }
 }
 
 export function suspendGhostProtocolForRelocation(ghost: InstalledGhost): void {
@@ -282,9 +292,7 @@ export function resumeGhostProtocolAfterRelocation(ghost: InstalledGhost): void 
   const owner = getActiveAppSession();
   const partition = ownerScopedGhostPartitionForInstalledGhost(ghost, owner);
   if (!partition) return;
-  if (partitionRegistered.has(partition)) {
-    registerGhostProtocol(partition, ghost, ghostProtocolOwnerSnapshot(owner));
-  }
+  registerGhostProtocol(partition, ghost, ghostProtocolOwnerSnapshot(owner));
   suspendedPartitions.delete(partition);
 }
 
@@ -297,6 +305,24 @@ export function resumeGhostProtocolAfterRelocation(ghost: InstalledGhost): void 
 const GHOST_HTML_CSP =
   "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; media-src 'self' data: blob:";
 
+function createGhostProtocolTargetGuard(
+  ghostId: string,
+  partition: string,
+  owner: GhostProtocolOwnerIdentity,
+): () => boolean {
+  const store = ghostKvStore;
+  if (!store) return () => false;
+  const expectedTarget = store.captureTarget(ghostId);
+  return () => expectedTarget !== null && expectedTarget !== undefined &&
+    ghostKvStore === store && !revokedPartitions.has(partition) &&
+    !suspendedPartitions.has(partition) && isGhostProtocolOwnerActive(owner) &&
+    store.isTargetCurrent(ghostId, expectedTarget);
+}
+
+function captureGhostProtocolTargetGuard(partition: string): () => boolean {
+  return partitionTargetGuard.get(partition) ?? (() => false);
+}
+
 function registerGhostProtocol(
   partition: string,
   ghost: InstalledGhost,
@@ -306,12 +332,19 @@ function registerGhostProtocol(
   if (registeredOwner && !isSameGhostProtocolOwner(registeredOwner, owner)) {
     throw new Error('ghost protocol partition already belongs to a different data owner');
   }
-  partitionGhost.set(partition, {
+  const binding = {
     dir: ghost.dir,
     entry: ghost.manifest.entry,
     storagePart: installedGhostStoragePart(ghost),
-  });
-  if (partitionRegistered.has(partition)) return;
+  };
+  if (partitionRegistered.has(partition)) {
+    const registered = partitionGhost.get(partition);
+    if (!registered || registered.dir !== binding.dir || registered.entry !== binding.entry || registered.storagePart !== binding.storagePart) {
+      revokedPartitions.add(partition);
+    }
+    return;
+  }
+  const isRegistrationCurrent = createGhostProtocolTargetGuard(binding.storagePart, partition, owner);
   // 注意:登记发生在全部挂载成功之后(函数末尾)——session.fromPartition 在
   // app ready 前会 throw,若先登记后挂载,失败分区会被永久标记"已注册"而
   // 实际无 handler,面板与电子脑一起哑火(review P0 的中毒模式)。
@@ -337,19 +370,16 @@ function registerGhostProtocol(
     }
     callback({ cancel: !allowed });
   });
-  ses.protocol.handle(SCHEME, async (request) => {
+  const handleRequest = async (request: Request): Promise<Response> => {
     try {
       // owner B 提交后，owner A 的旧 guest 仍可能短暂存活并新发请求。
-      // 在 URL 路由、body 读取和任何 provider 调用前拒绝旧 Session；已经
-      // 进入 handler 的请求不在这里取消或排空。
-      if (revokedPartitions.has(partition) || suspendedPartitions.has(partition) || !isGhostProtocolOwnerActive(owner)) {
+      // 在 URL 路由、body 读取和任何 provider 调用前拒绝旧 Session。
+      if (!isRegistrationCurrent()) {
         return new Response(null, {
           status: 403,
           headers: { 'Cache-Control': 'no-store' },
         });
       }
-      const binding = partitionGhost.get(partition);
-      if (!binding) return new Response(null, { status: 403 });
       const storagePart = binding.storagePart;
       const url = new URL(request.url);
       // 分区专属通道只认自己的 id,其它 host 一律 403(结构隔离的最后一道断言)。
@@ -447,13 +477,16 @@ function registerGhostProtocol(
       // (ghostKvEndpoint,已单测),这里只做 Response 包装。
       if (url.pathname === '/kv') {
         if (!ghostKvStore) return new Response(null, { status: 503 });
+        const store = ghostKvStore;
+        const isCurrent = captureGhostProtocolTargetGuard(partition);
         const out = await handleGhostKvRequest({
           method: request.method,
           // 有界读取(readBoundedBodyText):content-length 预检 + 流式限额,
           // 不受信 body 永不全量进主进程内存——沙箱允许死,主机不能被 OOM。
           readBodyText: () => readBoundedBodyText(request),
-          store: ghostKvStore,
+          store,
           ghostId: storagePart,
+          isCurrent,
           log,
         });
         return new Response(out.body ?? null, {
@@ -470,11 +503,14 @@ function registerGhostProtocol(
       // 明文单向进保险库,无任何读回动作;分区专属通道天然只碰自己的账。
       if (url.pathname === '/secrets' || url.pathname.startsWith('/secrets/')) {
         if (!ghostSecretsHandler) return new Response(null, { status: 503 });
+        const isCurrent = captureGhostProtocolTargetGuard(partition);
+        if (!isCurrent()) return new Response(null, { status: 403 });
         const out = await ghostSecretsHandler({
           ghostId: storagePart,
           method: request.method,
           pathname: url.pathname,
           readBodyText: () => readBoundedBodyText(request),
+          isCurrent,
         });
         return new Response(out.body ?? null, {
           status: out.status,
@@ -491,11 +527,14 @@ function registerGhostProtocol(
       // 动作;分区专属通道天然只碰自己的账。
       if (url.pathname === '/oauth' || url.pathname.startsWith('/oauth/')) {
         if (!ghostOauthHandler) return new Response(null, { status: 503 });
+        const isCurrent = captureGhostProtocolTargetGuard(partition);
+        if (!isCurrent()) return new Response(null, { status: 403 });
         const out = await ghostOauthHandler({
           ghostId: storagePart,
           method: request.method,
           pathname: url.pathname,
           readBodyText: () => readBoundedBodyText(request),
+          isCurrent,
         });
         return new Response(out.body ?? null, {
           status: out.status,
@@ -512,11 +551,14 @@ function registerGhostProtocol(
       // 与尾 4 位指纹;分区专属通道天然只碰自己的账。
       if (url.pathname === '/connections' || url.pathname.startsWith('/connections/')) {
         if (!ghostConnectionsHandler) return new Response(null, { status: 503 });
+        const isCurrent = captureGhostProtocolTargetGuard(partition);
+        if (!isCurrent()) return new Response(null, { status: 403 });
         const out = await ghostConnectionsHandler({
           ghostId: storagePart,
           method: request.method,
           pathname: url.pathname,
           readBodyText: () => readBoundedBodyText(request),
+          isCurrent,
         });
         return new Response(out.body ?? null, {
           status: out.status,
@@ -529,7 +571,7 @@ function registerGhostProtocol(
         });
       }
       if (url.pathname === GHOST_BOOT_PATH || url.pathname === '/') {
-        const entry = partitionGhost.get(partition)?.entry;
+        const entry = binding.entry;
         if (!entry) return new Response(null, { status: 404 });
         return new Response(ghostBootHtml(entry), {
           status: 200,
@@ -540,7 +582,7 @@ function registerGhostProtocol(
           },
         });
       }
-      const installDir = partitionGhost.get(partition)?.dir;
+      const installDir = binding.dir;
       if (!installDir) return new Response(null, { status: 404 });
       const filePath = resolveGhostFilePath(installDir, url.pathname);
       if (!filePath) return new Response(null, { status: 403 });
@@ -560,8 +602,16 @@ function registerGhostProtocol(
       log.error('cindy-ghost protocol error', { error: err instanceof Error ? err.message : String(err) });
       return new Response(null, { status: 500 });
     }
+  };
+  ses.protocol.handle(SCHEME, async (request) => {
+    const response = await handleRequest(request);
+    if (isRegistrationCurrent()) return response;
+    void response.body?.cancel().catch(() => undefined);
+    return new Response(null, { status: 403, headers: { 'Cache-Control': 'no-store' } });
   });
   partitionOwner.set(partition, owner);
+  partitionGhost.set(partition, binding);
+  partitionTargetGuard.set(partition, isRegistrationCurrent);
   partitionRegistered.add(partition); // 全部挂载成功,才算注册完成
 }
 

@@ -84,8 +84,10 @@ import {
   assertManagedPluginParentSync,
   createGhostInstallReceipt,
   effectiveInstallOrigin,
+  legacyFirstPartyEligibilityAfterUpdate,
   GhostInstallReceiptStore,
   hashApprovedSkillContent,
+  isValidGhostSourceStateArchiveId,
   readLegacyInstallTrust,
   type GhostInstallReceipt,
   type GhostInstallReceiptReadResult,
@@ -96,6 +98,7 @@ import {
   ghostManualLogicalPathForEntry,
 } from './ghostManualValidation.js';
 import { installedFileModeFromZip, isZipSymbolicLinkMode } from './ghostZipPermissions.js';
+import { captureLegacyFirstPartyEligibility } from './ghostFirstPartyPrivilege.js';
 
 /** 普通沙箱插件维持小包上限；随包 Node/CLI 允许更大的预打包产物。 */
 export const MAX_BASIC_CINDY_FILE_BYTES = 8 * 1024 * 1024;
@@ -253,6 +256,7 @@ export interface GhostManagerOptions {
   ) => NamespaceClassification;
   /** Only return an organization namespace after matching approved package and market provenance. */
   recoverUnstampedOrganizationNamespace?: (ghostId: string) => string | null;
+  captureLegacyFirstPartyEligibility?: (ghostId: string, approvedPackageSha256: string) => boolean;
   /** True when runtime/OAuth/install work should delay a first-time namespace stamp. */
   isNamespaceMigrationBusy?: (ghostId: string) => boolean;
   canResumePendingResidentOffline?: (ghostId: string) => boolean;
@@ -271,6 +275,7 @@ export interface GhostManagerOptions {
   onPhysicalRelocateCommitted?: (toRelId: string) => void;
   /** Fired when an in-place namespaced install is moved to its canonical _ns path. */
   onPhysicalRelocated?: (fromRelId: string, toRelId: string) => void | Promise<void>;
+  onArchiveSourceState?: (fromPart: string, archivePart: string) => Promise<void>;
   /** sourceDir 是否就是该 id 的随包只读种子目录，而非任意本机可变目录。 */
   isTrustedBundledSource?: (id: string, sourceDir: string) => boolean;
   /** Persist the user's builtin-uninstall intent before approval/content removal. */
@@ -589,6 +594,7 @@ export class GhostManager {
   /** Owner namespaces whose mutation journal could not be authoritatively scanned. */
   private readonly recoveryBlockedApprovalNamespaces = new Set<string>();
   private readonly pendingRecoverySideEffects = new Set<Promise<void>>();
+  private readonly pendingArchiveRecoveries = new Set<string>();
   private recoveryRetry: Promise<void> | null = null;
 
   /**
@@ -736,6 +742,17 @@ export class GhostManager {
     }
     if (outcome.kind === 'created') {
       try {
+        for (const entry of Object.values(outcome.ledger.entries)) {
+          const approval = this.readApproval(entry.relId);
+          if (approval.state === 'approved' && approval.receipt.packageSha256 &&
+              (captureLegacyFirstPartyEligibility({
+                legacyExistingInstall: true, ghostId: entry.ghostId, namespace: null, approved: true,
+                approvedPackageSha256: approval.receipt.packageSha256, marketRecord: null,
+                approvedOfficialTrust: approval.receipt.trust.level === 'cindy-official',
+              }) || this.options.captureLegacyFirstPartyEligibility?.(entry.ghostId, approval.receipt.packageSha256) === true)) {
+            this.receiptStore.captureLegacyFirstPartyEligibilitySync(entry.relId, approval.receipt.revision);
+          }
+        }
         this.namespaceMigrationStore().write(outcome.ledger);
       } catch (error) {
         this.options.log?.warn('namespace migration census write failed', {
@@ -772,10 +789,10 @@ export class GhostManager {
     if (next !== ledger) this.namespaceMigrationStore().write(next);
   }
 
-  private resolvePendingNamespaceInstall(
+  private async resolvePendingNamespaceInstall(
     ghostId: string,
     requestedNamespace: string | null,
-  ): ReturnType<typeof resolveInstallAgainstPending> {
+  ): Promise<ReturnType<typeof resolveInstallAgainstPending>> {
     const ledger = this.loadNamespaceMigrationLedger();
     const pending = ledger ? isPendingNamespaceGhost(ledger, ghostId) : false;
     if (!pending && ledger) {
@@ -800,11 +817,19 @@ export class GhostManager {
         classification: this.options.classifyPendingNamespace?.(ghostId) ?? null,
       });
     }
+    const classification = this.options.classifyPendingNamespace?.(ghostId) ?? null;
+    if (pending && requestedNamespace !== null && classification?.kind === 'commit' &&
+        classification.namespace !== requestedNamespace) {
+      const committed = await this.commitPendingNamespaceUnlocked(
+        ghostId, classification.namespace, classification.basis,
+      );
+      if (committed.ok) return { kind: 'proceed' };
+    }
     return resolveInstallAgainstPending({
       ghostId,
       requestedNamespace,
       pending,
-      classification: this.options.classifyPendingNamespace?.(ghostId) ?? null,
+      classification,
     });
   }
 
@@ -1282,6 +1307,77 @@ export class GhostManager {
                   (marker.oldPackageSha256 !== undefined
                     ? marker.oldPackageSha256 !== marker.packageSha256
                     : marker.phase === 'published'));
+            if (marker.sourceStateArchiveId !== undefined) {
+              if (!this.options.onArchiveSourceState) throw new Error('source archive recovery callback unavailable');
+              if (backupKind !== 'directory' && backupKind !== 'missing') {
+                throw new Error('managed update backup is not a real directory');
+              }
+              if (finalKind !== 'directory' && finalKind !== 'missing') {
+                throw new Error('managed update final is not a real directory');
+              }
+              if (!committed && approval.state === 'approved' &&
+                  approval.receipt.revision === marker.receiptRevision) {
+                throw new Error('committed update receipt has no published directory');
+              }
+              if (!committed && backupKind === 'missing' &&
+                  (finalKind !== 'directory' || marker.phase !== 'prepared')) {
+                throw new Error('source archive update rollback has no verified backup');
+              }
+              const recoveryKey = this.isolationKey(id);
+              if (!this.pendingArchiveRecoveries.has(recoveryKey)) {
+                const recoveryOwner = this.currentOwnerContextKey();
+                const fromPart = pluginStoragePart(parsePluginInstallRelId(id)!);
+                const archivePart = marker.sourceStateArchiveId;
+                this.pendingArchiveRecoveries.add(recoveryKey);
+                const recovery = this.runExclusiveMutation(async () => {
+                  let expectedMarker = marker;
+                  const assertRecoveryCurrent = () => {
+                    if (this.currentOwnerContextKey() !== recoveryOwner) {
+                      throw new Error('source archive recovery owner changed');
+                    }
+                    const currentMarker = this.receiptStore.readPendingMutationSync(id);
+                    const currentApproval = this.receiptStore.readForRecovery(id);
+                    if (currentMarker.state !== 'valid' ||
+                        JSON.stringify(currentMarker.mutation) !== JSON.stringify(expectedMarker) ||
+                        JSON.stringify(currentApproval) !== JSON.stringify(approval)) {
+                      throw new Error('source archive recovery transaction superseded');
+                    }
+                  };
+                  assertRecoveryCurrent();
+                  await this.options.onArchiveSourceState!(
+                    committed ? fromPart : archivePart, committed ? archivePart : fromPart,
+                  );
+                  assertRecoveryCurrent();
+                  if (committed) {
+                    if (this.recoveryEntryKind(backupPath) === 'directory') {
+                      fs.rmSync(backupPath, { recursive: true, force: true });
+                    }
+                  } else if (backupKind === 'directory') {
+                    expectedMarker = { ...marker, phase: 'prepared' };
+                    await this.receiptStore.writePendingMutation(id, expectedMarker);
+                    assertRecoveryCurrent();
+                    if (this.recoveryEntryKind(finalDir) === 'directory') {
+                      fs.rmSync(finalDir, { recursive: true, force: true });
+                    }
+                    fs.renameSync(backupPath, finalDir);
+                  }
+                  assertRecoveryCurrent();
+                  this.receiptStore.clearPendingMutationSync(id);
+                  this.untrustedApprovals.delete(recoveryKey);
+                }).catch((error) => {
+                  this.options.log?.warn('ghost source archive recovery failed', {
+                    id, error: error instanceof Error ? error.message : String(error),
+                  });
+                });
+                this.pendingRecoverySideEffects.add(recovery);
+                const clearRecovery = () => {
+                  this.pendingRecoverySideEffects.delete(recovery);
+                  this.pendingArchiveRecoveries.delete(recoveryKey);
+                };
+                void recovery.then(clearRecovery, clearRecovery);
+              }
+              continue;
+            }
             if (committed) {
               if (backupKind === 'directory') {
                 fs.rmSync(backupPath, { recursive: true, force: true }); // 陈旧旧字节
@@ -1681,6 +1777,18 @@ export class GhostManager {
     }
   }
 
+  readLegacyFirstPartyEligible(id: string): boolean {
+    this.ensureCurrentOwnerContextSync();
+    const relId = this.approvalRelIdFor(id);
+    if (!relId) return false;
+    try {
+      const approval = this.readApproval(relId);
+      return approval.state === 'approved' && approval.receipt.legacyFirstPartyEligible === true;
+    } catch {
+      return false;
+    }
+  }
+
   isPendingLegacyForge(id: string): boolean {
     return this.isPendingLegacyNamespace(id) && this.readEffectiveInstallOrigin(id) === 'agent-forge';
   }
@@ -1690,8 +1798,7 @@ export class GhostManager {
     const identity = parsePluginInstallRelId(id);
     if (!identity || identity.namespace !== null) return false;
     const ledger = this.loadNamespaceMigrationLedger();
-    return (isPendingNamespaceGhost(ledger, id) ||
-      this.readApproval(id).state === 'approved') &&
+    return isPendingNamespaceGhost(ledger, id) && this.readApproval(id).state === 'approved' &&
       this.readDeliveryNamespace(id) === undefined;
   }
 
@@ -1710,6 +1817,21 @@ export class GhostManager {
       throw new Error(`approved Plugin receipt is unavailable: ${approval.state}`);
     }
     return effectiveInstallOrigin(approval.receipt);
+  }
+
+  readApprovedInstallReceipt(id: string, expectedRevision?: string): GhostInstallReceipt | null {
+    this.ensureCurrentOwnerContextSync();
+    const relId = this.approvalRelIdFor(id);
+    if (!relId) return null;
+    try {
+      if (this.hasPendingMutationJournal(relId)) return null;
+      const approval = this.readApproval(relId);
+      if (approval.state !== 'approved' ||
+          (expectedRevision !== undefined && approval.receipt.revision !== expectedRevision)) return null;
+      return approval.receipt;
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -3289,7 +3411,7 @@ export class GhostManager {
       initiallyEnabled?: boolean;
       expectedPackageSha256?: string;
       trustOverride?: GhostHostTrustOverride;
-      installOrigin?: 'agent-forge';
+      installOrigin?: 'manual' | 'agent-forge';
       namespace?: string | null;
       /** Synchronous live-authority check immediately before publishing the staged package. */
       beforePackagePlacement?: () => void;
@@ -3304,7 +3426,7 @@ export class GhostManager {
       initiallyEnabled?: boolean;
       expectedPackageSha256?: string;
       trustOverride?: GhostHostTrustOverride;
-      installOrigin?: 'agent-forge';
+      installOrigin?: 'manual' | 'agent-forge';
       namespace?: string | null;
       beforePackagePlacement?: () => void;
     },
@@ -3362,7 +3484,7 @@ export class GhostManager {
         return { rejection: { code: 'already-installed', reason: `意识 ${manifest.id} 已装入` } };
       }
     }
-    const pendingInstall = this.resolvePendingNamespaceInstall(manifest.id, identity.namespace);
+    const pendingInstall = await this.resolvePendingNamespaceInstall(manifest.id, identity.namespace);
     if (pendingInstall.kind === 'already-installed') {
       return { rejection: { code: 'already-installed', reason: `意识 ${manifest.id} 已装入` } };
     }
@@ -3589,8 +3711,9 @@ export class GhostManager {
       expectedInstalledApproval: string;
       expectedPackageSha256?: string;
       trustOverride?: GhostHostTrustOverride;
-      installOrigin?: 'agent-forge';
+      installOrigin?: 'manual' | 'agent-forge';
       namespace?: string | null;
+      sourceStateArchiveId?: string;
       beforePackageCommit?: () => GhostPackageCommitPreparation | void;
       /** 目录换位完成后、任何通知或运行时收尾前触发。 */
       onPackagePlaced?: () => void;
@@ -3605,8 +3728,9 @@ export class GhostManager {
       expectedInstalledApproval: string;
       expectedPackageSha256?: string;
       trustOverride?: GhostHostTrustOverride;
-      installOrigin?: 'agent-forge';
+      installOrigin?: 'manual' | 'agent-forge';
       namespace?: string | null;
+      sourceStateArchiveId?: string;
       /** 新目录已换位、旧目录仍可回滚时执行；抛错会恢复旧版本。 */
       beforePackageCommit?: () => GhostPackageCommitPreparation | void;
       /** 目录换位完成后、任何通知或运行时收尾前触发。 */
@@ -3643,6 +3767,13 @@ export class GhostManager {
     const identity = createPluginLogicalIdentity(opts.namespace ?? null, manifest.id);
     const relId =
       this.resolvePhysicalRelId(pluginInstallRelId(identity)) ?? pluginInstallRelId(identity);
+    const fromPart = pluginStoragePart(parsePluginInstallRelId(relId) ?? identity);
+    const archiveId = opts.sourceStateArchiveId;
+    if (archiveId !== undefined &&
+        (!isValidGhostSourceStateArchiveId(archiveId) || archiveId === fromPart ||
+          !this.options.onArchiveSourceState)) {
+      return { rejection: { code: 'io', reason: 'source state archive identity or callback unavailable' } };
+    }
     const finalDir = this.contentPath(relId);
     if (!this.isRealDirChildRel(relId)) {
       return {
@@ -3723,6 +3854,7 @@ export class GhostManager {
         backupDirName: path.basename(backupDir),
         receiptRevision,
         phase: 'prepared',
+        ...(archiveId !== undefined ? { sourceStateArchiveId: archiveId } : {}),
         ...(approvalResult.state === 'approved' && approvalResult.receipt.packageSha256
           ? { oldPackageSha256: approvalResult.receipt.packageSha256 }
           : {}),
@@ -3768,6 +3900,7 @@ export class GhostManager {
         backupDirName: path.basename(backupDir),
         receiptRevision,
         phase: 'backed-up',
+        ...(archiveId !== undefined ? { sourceStateArchiveId: archiveId } : {}),
         ...(approvalResult.state === 'approved' && approvalResult.receipt.packageSha256
           ? { oldPackageSha256: approvalResult.receipt.packageSha256 }
           : {}),
@@ -3817,8 +3950,15 @@ export class GhostManager {
     // committed. Later failures compensate both this side effect and the
     // directory swap; either rollback failure keeps journal + quarantine.
     let packageCommitPreparation: GhostPackageCommitPreparation | undefined;
+    let archiveAttempted = false;
+    let archiveCompleted = false;
     let receipt: GhostInstallReceipt;
     try {
+      if (archiveId !== undefined) {
+        archiveAttempted = true;
+        await this.options.onArchiveSourceState!(fromPart, archiveId);
+        archiveCompleted = true;
+      }
       packageCommitPreparation = opts.beforePackageCommit?.() ?? undefined;
       receipt = createGhostInstallReceipt({
         manifest: approvedManifest,
@@ -3835,16 +3975,35 @@ export class GhostManager {
         revision: receiptRevision,
         ...(iconDataUrl !== undefined ? { iconDataUrl } : {}),
         ...(installOrigin ? { installOrigin } : {}),
+        ...(approvalResult.state === 'approved' &&
+          legacyFirstPartyEligibilityAfterUpdate(approvalResult.receipt, archiveId !== undefined)
+          ? { legacyFirstPartyEligible: true } : {}),
         ...this.persistedNamespaceFields(opts, approvalResult.state === 'approved' ? approvalResult.receipt : null),
       });
       await this.receiptStore.write(receipt, { skillSourceDir: finalDir, relId });
     } catch (err) {
-      let sideEffectRolledBack = !(
+      let archiveRestored = !archiveAttempted;
+      if (archiveCompleted && archiveId !== undefined) {
+        try {
+          await this.options.onArchiveSourceState!(archiveId, fromPart);
+          const pending = this.receiptStore.readPendingMutationSync(relId);
+          if (pending.state !== 'valid' || pending.mutation.kind !== 'update') {
+            throw new Error('source archive rollback journal unavailable');
+          }
+          await this.receiptStore.writePendingMutation(relId, { ...pending.mutation, phase: 'prepared' });
+          archiveRestored = true;
+        } catch (rollbackError) {
+          this.options.log?.warn('ghost source archive rollback failed', {
+            id: manifest.id, error: rollbackError instanceof Error ? rollbackError.message : String(rollbackError),
+          });
+        }
+      }
+      let sideEffectRolledBack = archiveRestored && !(
         err instanceof Error &&
         'rollbackFailed' in err &&
         err.rollbackFailed === true
       );
-      if (packageCommitPreparation) {
+      if (packageCommitPreparation && archiveRestored) {
         try {
           packageCommitPreparation.rollback();
         } catch (rollbackErr) {

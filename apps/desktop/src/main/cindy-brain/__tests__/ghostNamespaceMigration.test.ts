@@ -307,7 +307,7 @@ describe('commit and install conflict', () => {
     })).toBeNull();
   });
 
-  it('blocks a same-name org install until the pending instance is classified as root', () => {
+  it('blocks a same-name org install until the pending identity is committed', () => {
     expect(
       resolveInstallAgainstPending({
         ghostId: 'hello',
@@ -323,7 +323,7 @@ describe('commit and install conflict', () => {
         pending: true,
         classification: { kind: 'commit', namespace: null, basis: 'market-public' },
       }),
-    ).toEqual({ kind: 'proceed' });
+    ).toMatchObject({ kind: 'wait' });
     expect(
       resolveInstallAgainstPending({
         ghostId: 'hello',

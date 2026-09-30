@@ -60,7 +60,10 @@ function loader(overrides: Partial<LoadGhostFirstPartyFactsLoaderOptions> = {}) 
   return loadGhostFirstPartyFactsLoader({
     readInstalledBuiltin: () => false,
     readMarketInstallation: () => null,
-    readApprovedPackageSha256: () => null,
+    readApprovedPackageSha256: (ghostId) => ['xd-feishu', 'xd-atlassian'].includes(ghostId) ? 'a'.repeat(64) : null,
+    readTrustedSource: (ghostId) => ['xd-feishu', 'xd-atlassian'].includes(ghostId) ? {
+      kind: 'builtin-official', ghostId, namespace: null, packageSha256: 'a'.repeat(64),
+    } : null,
     lookupOrganizationPrefix: () => ({ kind: 'absent' }),
     readInstallOrigin: () => 'manual',
     ...overrides,
@@ -87,6 +90,8 @@ describe('loadGhostFirstPartyFactsLoader', () => {
         marketRecord: null,
         currentOrganization: null,
         installOrigin: 'manual',
+        trustedSource: { kind: 'builtin-official', ghostId, namespace: null, packageSha256: 'a'.repeat(64) },
+        approvedPackageSha256: 'a'.repeat(64),
       });
       expect(resolveGhostFirstPartyPrivilege(loaded.facts)).toEqual({
         brokerEligible: true,
@@ -459,7 +464,7 @@ describe('loadGhostFirstPartyFactsLoader', () => {
       kind: 'ready' as const,
       facts: {
         ghostId: 'acme-tool',
-        namespace: null,
+        namespace: 'slug-a',
         builtin: false,
         marketRecord: bindPendingMarketRecordToInspectedPackage(
           pending,

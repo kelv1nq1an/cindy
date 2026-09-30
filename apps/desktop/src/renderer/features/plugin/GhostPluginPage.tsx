@@ -80,7 +80,7 @@ import { resolveSystemLocale } from '../../../shared/locale';
 import {
   ghostInstallApprovalToken,
   ghostPanelKind,
-  isOfficialGhostId,
+  isUserInstallReservedGhostId,
   type GhostSetupStatus,
   type InstalledGhost,
 } from '../../../shared/ghost';
@@ -1589,10 +1589,8 @@ export function GhostPluginPage({
               updateVersion={selectedMarketUpdate?.version}
               updateBusy={(selectedMarketUpdate !== null && marketBusyId !== null) || batchRunning}
               onUninstall={() => void handleUninstall()}
-              // 官方保留前缀(cindy-/filo-/xd-)的插件走本地装入会被拒,
-              // 导出产物无法重装,不提供导出项。
               onExport={
-                selectedGhost && !isOfficialGhostId(selectedDetail.ghostId)
+                selectedGhost && !isUserInstallReservedGhostId(selectedDetail.ghostId)
                   ? () => void handleExport()
                   : undefined
               }
