@@ -108,6 +108,7 @@ export function downloadIdentityMatchesPlugin(
 
 /** Organization-scoped installs live under this reserved content/state root. */
 export const PLUGIN_NS_INSTALL_ROOT = '_ns';
+export const PLUGIN_ROOT_INSTALL_ROOT = '_root';
 
 /** Posix-style relative id: `helper` or `_ns/acme/helper`. Safe for directories. */
 export function pluginInstallRelId(identity: PluginLogicalIdentity): string {
@@ -115,9 +116,26 @@ export function pluginInstallRelId(identity: PluginLogicalIdentity): string {
   return `${PLUGIN_NS_INSTALL_ROOT}/${identity.namespace}/${identity.ghostId}`;
 }
 
+export function pluginNewInstallRelId(identity: PluginLogicalIdentity): string {
+  return identity.namespace === null
+    ? `${PLUGIN_ROOT_INSTALL_ROOT}/${identity.ghostId}`
+    : pluginInstallRelId(identity);
+}
+
+export function pluginInstallStoragePart(relId: string): string {
+  const identity = parsePluginInstallRelId(relId);
+  if (!identity) throw new Error('插件安装目录不合法');
+  return relId.startsWith(`${PLUGIN_ROOT_INSTALL_ROOT}/`)
+    ? `${PLUGIN_ROOT_INSTALL_ROOT}__${identity.ghostId}`
+    : pluginStoragePart(identity);
+}
+
 export function parsePluginInstallRelId(value: string): PluginLogicalIdentity | null {
   if (isGhostIdValue(value)) return { namespace: null, ghostId: value };
   const parts = value.split('/');
+  if (parts.length === 2 && parts[0] === PLUGIN_ROOT_INSTALL_ROOT && isValidGhostId(parts[1])) {
+    return { namespace: null, ghostId: parts[1] };
+  }
   if (
     parts.length === 3 &&
     parts[0] === PLUGIN_NS_INSTALL_ROOT &&
@@ -146,6 +164,10 @@ export function pluginStoragePart(identity: PluginLogicalIdentity): string {
 
 export function parsePluginStoragePart(value: string): PluginLogicalIdentity | null {
   if (isGhostIdValue(value)) return { namespace: null, ghostId: value };
+  const rootPrefix = `${PLUGIN_ROOT_INSTALL_ROOT}__`;
+  if (value.startsWith(rootPrefix) && isValidGhostId(value.slice(rootPrefix.length))) {
+    return { namespace: null, ghostId: value.slice(rootPrefix.length) };
+  }
   const prefix = `${PLUGIN_NS_INSTALL_ROOT}__`;
   if (!value.startsWith(prefix)) return null;
   const rest = value.slice(prefix.length);
@@ -170,6 +192,14 @@ export function parsePluginInstanceId(value: string): PluginLogicalIdentity | nu
   return parsePluginInstallRelId(value) ?? parsePluginStoragePart(value);
 }
 
+export function pluginInstanceInstallRelId(value: string): string | null {
+  if (parsePluginInstallRelId(value)) return value;
+  const identity = parsePluginStoragePart(value);
+  if (!identity) return null;
+  return value.startsWith(PLUGIN_ROOT_INSTALL_ROOT + '__')
+    ? pluginNewInstallRelId(identity) : pluginInstallRelId(identity);
+}
+
 /** Runtime / UI instance id: storage part or install rel id. */
 export function isGhostInstanceId(value: unknown): value is string {
   return typeof value === 'string' && parsePluginInstanceId(value) !== null;
@@ -185,6 +215,9 @@ export function installedGhostPhysicalRelId(ghost: InstalledGhostIdentitySource)
 
 function parseInstallRelIdFromDir(dir: string, ghostId: string): string | null {
   const normalized = dir.replace(/\\/g, '/').replace(/\/+$/, '');
+  if (normalized.endsWith(`/${PLUGIN_ROOT_INSTALL_ROOT}/${ghostId}`)) {
+    return `${PLUGIN_ROOT_INSTALL_ROOT}/${ghostId}`;
+  }
   const marker = `/${PLUGIN_NS_INSTALL_ROOT}/`;
   const at = normalized.lastIndexOf(marker);
   if (at >= 0) {
@@ -220,9 +253,8 @@ export function resolvePluginLibraryStorageKey(
   ghost?: InstalledGhostIdentitySource | null,
 ): string | null {
   if (ghost) return installedGhostStoragePart(ghost);
-  if (isValidPluginStoragePart(instanceId)) return instanceId;
-  const identity = parsePluginInstanceId(instanceId);
-  return identity ? pluginStoragePart(identity) : null;
+  const relId = pluginInstanceInstallRelId(instanceId);
+  return relId ? pluginInstallStoragePart(relId) : null;
 }
 
 /**
@@ -237,8 +269,7 @@ export function installedGhostPhysicalKeys(
   ghost: InstalledGhostIdentitySource,
 ): { relId: string; storagePart: string } {
   const relId = installedGhostPhysicalRelId(ghost);
-  const identity = parsePluginInstallRelId(relId) ?? installedGhostLogicalIdentity(ghost);
-  return { relId, storagePart: pluginStoragePart(identity) };
+  return { relId, storagePart: pluginInstallStoragePart(relId) };
 }
 
 export function installedGhostMutationTargetToken(
@@ -288,6 +319,10 @@ export function findInstalledGhostByInstanceId<T extends {
 }>(ghosts: readonly T[], instanceId: string): T | undefined {
   const byStorage = ghosts.find((ghost) => installedGhostStoragePart(ghost) === instanceId);
   if (byStorage) return byStorage;
+  const byDirectory = ghosts.find((ghost) => installedGhostPhysicalRelId(ghost) === instanceId);
+  if (byDirectory) return byDirectory;
+  if (instanceId.startsWith(PLUGIN_ROOT_INSTALL_ROOT + '/') ||
+      instanceId.startsWith(PLUGIN_ROOT_INSTALL_ROOT + '__')) return undefined;
   const identity = parsePluginInstanceId(instanceId);
   return identity ? findInstalledGhostByIdentity(ghosts, identity) : undefined;
 }

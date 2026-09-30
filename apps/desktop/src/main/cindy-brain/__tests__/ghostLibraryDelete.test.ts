@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import ts from 'typescript';
+import { createGhostProductionCallbacks } from './ghostProductionCallbacksFixture.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { ghostInstallApprovalToken, type InstalledGhost } from '../../../shared/ghost.js';
@@ -17,43 +17,23 @@ import { GhostMutationCoordinator } from '../ghostMutationCoordinator.js';
 import { assertLibraryMetaOwner, LibraryBindingStore, relocateLibraryMetaOwner } from '../libraryBinding.js';
 import { trashGhostLibrary } from '../libraryTrash.js';
 
-const source = fs.readFileSync(new URL('../index.ts', import.meta.url), 'utf8');
-const ast = ts.createSourceFile('index.ts', source, ts.ScriptTarget.Latest, true);
-
 function deferred<Value>() {
   let resolve!: (value: Value) => void;
   const promise = new Promise<Value>((finish) => { resolve = finish; });
   return { promise, resolve };
 }
 
-function loadDelete(deps: Record<string, unknown>) {
-  const names = new Set([
+const loadDelete = createGhostProductionCallbacks<{
+  handler: (event: { sender: object }, id: string) => Promise<{ ok: boolean }>;
+  deleteGhostLibraryForActiveOwner: (id: string) => Promise<{ ok: boolean }>;
+}>({
+  functions: [
     'captureGhostMutationOwner', 'beginGhostMutation', 'ghostInstallMutationTargetFor',
     'libraryStorageKeyFor', 'ghostLibraryDeleteTargetFor', 'deleteGhostLibraryForActiveOwner',
     'deleteGhostLibraryLocked',
-  ]);
-  const declarations = ast.statements.filter((node): node is ts.FunctionDeclaration =>
-    ts.isFunctionDeclaration(node) && !!node.name && names.has(node.name.text),
-  ).map((node) => node.getText(ast).replace(/^export /, ''));
-  let callback: ts.Expression | undefined;
-  const visit = (node: ts.Node): void => {
-    if (ts.isCallExpression(node) && node.expression.getText(ast) === 'ipcMain.handle' &&
-        ts.isStringLiteral(node.arguments[0]) && node.arguments[0].text === 'ghosts:library-delete') {
-      callback = node.arguments[1];
-    }
-    ts.forEachChild(node, visit);
-  };
-  visit(ast);
-  if (!callback) throw new Error('Library delete IPC missing');
-  const compiled = ts.transpileModule(declarations.join('\n') + '\nconst handler = ' + callback.getText(ast), {
-    compilerOptions: { target: ts.ScriptTarget.ES2022 },
-  }).outputText;
-  return new Function('deps', 'const {' + Object.keys(deps).join(',') + '} = deps;' + compiled +
-    ';return { handler, deleteGhostLibraryForActiveOwner };')(deps) as {
-    handler: (event: { sender: object }, id: string) => Promise<{ ok: boolean }>;
-    deleteGhostLibraryForActiveOwner: (id: string) => Promise<{ ok: boolean }>;
-  };
-}
+  ],
+  callbacks: { handler: ['ipcMain.handle', 'ghosts:library-delete'] },
+});
 
 let directory: string;
 

@@ -71,6 +71,16 @@ function loader(overrides: Partial<LoadGhostFirstPartyFactsLoaderOptions> = {}) 
 }
 
 describe('loadGhostFirstPartyFactsLoader', () => {
+  it('reads a new root receipt without inheriting the same-name legacy organization receipt', () => {
+    const reads: string[] = [];
+    const loaded = loader({
+      readInstallNamespace: (id) => { reads.push(id); return id === 'xd-feishu' ? 'xd' : null; },
+      lookupOrganizationPrefix: () => ({ kind: 'known', pluginPrefix: 'xd' }),
+    }).load('_root__xd-feishu', 'runtime', ORG_A);
+    expect(reads).toEqual(['_root/xd-feishu']);
+    expect(loaded).toMatchObject({ kind: 'ready', facts: { namespace: null } });
+    if (loaded.kind === 'ready') expect(resolveGhostFirstPartyPrivilege(loaded.facts).brokerEligible).toBe(false);
+  });
   it('gives builtin official plugins broker on a personal identity with no prefix cache', () => {
     const factsLoader = loader({
       readInstalledBuiltin: (ghostId) => ghostId === 'xd-feishu' || ghostId === 'xd-atlassian',

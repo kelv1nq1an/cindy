@@ -11,7 +11,9 @@ import {
   parsePluginInstallRelId,
   parsePluginStoragePart,
   PLUGIN_NS_INSTALL_ROOT,
+  PLUGIN_ROOT_INSTALL_ROOT,
   pluginInstallRelId,
+  pluginInstallStoragePart,
   pluginStoragePart,
 } from '../../shared/pluginIdentity.js';
 import {
@@ -215,8 +217,7 @@ export type GhostPendingMutation =
     }
   // uninstall 不带 packageSha256:它的提交信号不是"receipt 写到某版本",而是"receipt +
   // 内容目录都已移除"。恢复见到它就把两者删干净(顺序无关,幂等)。
-  | { kind: 'uninstall'; builtinTombstone?: boolean }
-  | { kind: 'relocate'; fromRelId: string; toRelId: string };
+  | { kind: 'uninstall'; builtinTombstone?: boolean };
 
 export type GhostPendingMutationReadResult =
   | { state: 'valid'; mutation: GhostPendingMutation }
@@ -761,13 +762,9 @@ export class GhostInstallReceiptStore {
   private pendingMutationPath(id: string): string {
     const identity = parsePluginInstallRelId(id);
     if (!identity) throw new Error('invalid ghost id for pending mutation path');
-    if (identity.namespace === null) {
-      return path.join(this.rootDir(), `.pending-${identity.ghostId}.json`);
-    }
     return path.join(
       this.rootDir(),
-      PLUGIN_NS_INSTALL_ROOT,
-      identity.namespace,
+      ...id.split('/').slice(0, -1),
       `.pending-${identity.ghostId}.json`,
     );
   }
@@ -865,20 +862,6 @@ export class GhostInstallReceiptStore {
           kind: 'uninstall',
           ...(raw.builtinTombstone === true ? { builtinTombstone: true } : {}),
         },
-      };
-    }
-    if (raw.kind === 'relocate') {
-      if (
-        typeof raw.fromRelId !== 'string' ||
-        typeof raw.toRelId !== 'string' ||
-        !isValidPluginInstallRelId(raw.fromRelId) ||
-        !isValidPluginInstallRelId(raw.toRelId)
-      ) {
-        return { state: 'invalid', reason: 'journal relocate ids are invalid' };
-      }
-      return {
-        state: 'valid',
-        mutation: { kind: 'relocate', fromRelId: raw.fromRelId, toRelId: raw.toRelId },
       };
     }
     if (typeof raw.packageSha256 !== 'string' || !/^[a-f0-9]{64}$/.test(raw.packageSha256)) {
@@ -1008,6 +991,20 @@ export class GhostInstallReceiptStore {
           reason: error instanceof Error ? error.message : String(error),
         };
       }
+    }
+    try {
+      const rootDir = path.join(this.rootDir(), PLUGIN_ROOT_INSTALL_ROOT);
+      if (this.assertPathParentSync(path.join(rootDir, '.pending-scan'))) {
+        for (const name of fs.readdirSync(rootDir)) {
+          const match = /^\.pending-(.+)\.json$/.exec(name);
+          if (!match) continue;
+          const relId = PLUGIN_ROOT_INSTALL_ROOT + '/' + match[1];
+          if (isValidPluginInstallRelId(relId)) ids.push(relId);
+          else blocked = true;
+        }
+      }
+    } catch (error) {
+      return { state: 'unreadable', reason: error instanceof Error ? error.message : String(error) };
     }
     return { state: 'ok', ids, blocked };
   }
@@ -1149,9 +1146,8 @@ function isValidUniqueGhostIdArray(value: unknown): value is string[] {
 }
 
 function isManagedBackupDirName(id: string, name: string): boolean {
-  const identity = parsePluginInstallRelId(id);
-  if (!identity) return false;
-  return new RegExp(`^\\.cindy-updating-${escapeRegExp(pluginStoragePart(identity))}-[0-9a-f]{8}$`).test(name);
+  if (!isValidPluginInstallRelId(id)) return false;
+  return new RegExp(`^\\.cindy-updating-${escapeRegExp(pluginInstallStoragePart(id))}-[0-9a-f]{8}$`).test(name);
 }
 
 function escapeRegExp(value: string): string {

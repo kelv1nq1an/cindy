@@ -1,5 +1,4 @@
-import fs from 'node:fs';
-import ts from 'typescript';
+import { createGhostProductionCallbacks } from './ghostProductionCallbacksFixture.js';
 import { describe, expect, it, vi } from 'vitest';
 
 import type { InstalledGhost } from '../../../shared/ghost.js';
@@ -25,26 +24,11 @@ const routes = [
 ] as const;
 type Route = typeof routes[number];
 
-const source = fs.readFileSync(new URL('../index.ts', import.meta.url), 'utf8');
-const ast = ts.createSourceFile('index.ts', source, ts.ScriptTarget.Latest, true);
-
 function loadCallback(setter: string, deps: Record<string, unknown>, omitGuard = false): Callback {
-  let callback: ts.Expression | undefined;
-  const visit = (node: ts.Node): void => {
-    if (ts.isCallExpression(node) && node.expression.getText(ast) === setter) {
-      if (callback) throw new Error('Duplicate protocol callback: ' + setter);
-      callback = node.arguments[0];
-    }
-    ts.forEachChild(node, visit);
-  };
-  visit(ast);
-  if (!callback) throw new Error('Protocol callback missing: ' + setter);
-  let callbackSource = callback.getText(ast);
-  if (omitGuard) callbackSource = callbackSource.replace(/^\s*isCurrent,\r?\n/gm, '');
-  const compiled = ts.transpileModule('const handler = ' + callbackSource, {
-    compilerOptions: { target: ts.ScriptTarget.ES2022 },
-  }).outputText;
-  return new Function('deps', 'const {' + Object.keys(deps).join(',') + '} = deps;' + compiled + ';return handler;')(deps) as Callback;
+  return createGhostProductionCallbacks<{ handler: Callback }>({
+    callbacks: { handler: [setter] },
+    transformCallback: omitGuard ? (source) => source.replace(/^\s*isCurrent,\r?\n/gm, '') : undefined,
+  })(deps).handler;
 }
 
 function deferred<Value>() {

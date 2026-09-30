@@ -24,7 +24,7 @@ const USER_DATA_REFERENCES = [
 type RelocateReference = (fromPart: string, toPart: string) => void | Promise<unknown>;
 
 export type GhostUserDataRelocationResources = Record<
-  (typeof USER_DATA_REFERENCES)[number] | 'ui',
+  (typeof USER_DATA_REFERENCES)[number],
   RelocateReference
 > & {
   userDataPath: (...parts: string[]) => string;
@@ -57,7 +57,6 @@ export async function relocateGhostUserDataResources(
   fromPart: string,
   toPart: string,
   resources: GhostUserDataRelocationResources,
-  moveUiReferences: boolean,
 ): Promise<void> {
   if (fromPart === toPart) return;
   resources.assertCurrent();
@@ -72,10 +71,6 @@ export async function relocateGhostUserDataResources(
   for (const resource of USER_DATA_REFERENCES) {
     resources.assertCurrent();
     await resources[resource](fromPart, toPart);
-  }
-  if (moveUiReferences) {
-    resources.assertCurrent();
-    await resources.ui(fromPart, toPart);
   }
   resources.assertCurrent();
 }

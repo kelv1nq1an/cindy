@@ -1,6 +1,5 @@
-import fs from 'node:fs';
 import { createHash } from 'node:crypto';
-import ts from 'typescript';
+import { createGhostProductionCallbacks } from './ghostProductionCallbacksFixture.js';
 import { describe, expect, it, vi } from 'vitest';
 import {
   ghostInstallApprovalToken,
@@ -25,46 +24,25 @@ import { isCindyOverrideModelAllowed } from '../cindyOverrideWhitelist.js';
 
 type Handler = (event: unknown, ...args: unknown[]) => Promise<unknown>;
 
+const callbackChannels = {
+  inspect: 'ghosts:inspect', update: 'ghosts:update', exportGhost: 'ghosts:export',
+  cindyPrefs: 'ghosts:cindy-prefs:set', errandPrefs: 'ghosts:errand-prefs:set',
+};
+const createCallbacks = createGhostProductionCallbacks<Record<keyof typeof callbackChannels, Handler>>({
+  functions: [
+    'readLocalGhostUpdateSource', 'updateLocalGhostPackageLocked', 'rejectUnauthorizedTokenBroker',
+    'assertGhostRelocationIdle', 'findGhostForInstanceId',
+  ],
+  callbacks: Object.fromEntries(Object.entries(callbackChannels).map(([name, channel]) =>
+    [name, ['ipcMain.handle', channel] as const],
+  )),
+});
+
 function productionCallbacks(deps: Record<string, unknown>): Record<string, Handler> {
-  const source = fs.readFileSync(new URL('../index.ts', import.meta.url), 'utf8');
-  const ast = ts.createSourceFile('index.ts', source, ts.ScriptTarget.Latest, true);
-  const functions = [
-    'readLocalGhostUpdateSource',
-    'updateLocalGhostPackageLocked',
-    'rejectUnauthorizedTokenBroker',
-    'assertGhostRelocationIdle',
-    'findGhostForInstanceId',
-  ];
-  const declarations: string[] = [];
-  const callbacks: string[] = [];
-  const visit = (node: ts.Node): void => {
-    if (ts.isFunctionDeclaration(node) && node.name && functions.includes(node.name.text))
-      declarations.push(node.getText(ast).replace(/^export /, ''));
-    if (
-      ts.isCallExpression(node) &&
-      node.expression.getText(ast) === 'ipcMain.handle' &&
-      ts.isStringLiteral(node.arguments[0]) &&
-      ['ghosts:inspect', 'ghosts:update', 'ghosts:export', 'ghosts:cindy-prefs:set', 'ghosts:errand-prefs:set'].includes(node.arguments[0].text)
-    ) {
-      callbacks.push(
-        JSON.stringify(node.arguments[0].text) + ': ' + node.arguments[1].getText(ast),
-      );
-    }
-    ts.forEachChild(node, visit);
-  };
-  visit(ast);
-  if (declarations.length !== functions.length || callbacks.length !== 5)
-    throw new Error('Production callbacks missing');
-  const compiled = ts.transpileModule(
-    declarations.join(';') + ';const callbacks = {' + callbacks.join(',') + '};',
-    {
-      compilerOptions: { target: ts.ScriptTarget.ES2022 },
-    },
-  ).outputText;
-  return new Function(
-    'deps',
-    'const {' + Object.keys(deps).join(',') + '} = deps;' + compiled + ';return callbacks;',
-  )(deps);
+  const callbacks = createCallbacks(deps);
+  return Object.fromEntries(Object.entries(callbackChannels).map(([name, channel]) =>
+    [channel, callbacks[name as keyof typeof callbacks]],
+  ));
 }
 
 const packageSha256 = 'a'.repeat(64);

@@ -63,23 +63,25 @@ function manifest(id = 'hello'): Record<string, unknown> {
   };
 }
 
-it('rejects linked namespace parents for content recovery and state journals', async () => {
+it.each(['_ns', '_root'])('rejects linked %s parents for content recovery and state journals', async (reservedRoot) => {
   const outside = path.join(workDir, 'outside');
-  const contentNs = path.join(rootDir, '_ns');
+  const contentNs = path.join(rootDir, reservedRoot);
+  const relId = reservedRoot === '_ns' ? '_ns/acme/hello' : '_root/hello';
   const stateRoot = path.join(workDir, 'ghosts-install-state');
   await fs.promises.mkdir(outside, { recursive: true });
   await fs.promises.mkdir(rootDir, { recursive: true });
   await fs.promises.writeFile(path.join(outside, 'sentinel'), 'keep');
   await fs.promises.symlink(outside, contentNs, 'dir');
-  expect(() => assertManagedPluginParentSync(rootDir, '_ns/acme/hello')).toThrow();
+  expect(() => assertManagedPluginParentSync(rootDir, relId)).toThrow();
 
   const store = new GhostInstallReceiptStore(() => stateRoot);
   await fs.promises.mkdir(stateRoot, { recursive: true });
-  await fs.promises.symlink(outside, path.join(stateRoot, '_ns'), 'dir');
-  await expect(store.writePendingMutation('_ns/acme/hello', {
+  await fs.promises.symlink(outside, path.join(stateRoot, reservedRoot), 'dir');
+  await expect(store.writePendingMutation(relId, {
     kind: 'install', packageSha256: 'a'.repeat(64),
   })).rejects.toThrow();
-  expect(store.readPendingMutationSync('_ns/acme/hello').state).toBe('unreadable');
+  expect(store.readPendingMutationSync(relId).state).toBe('unreadable');
+  if (reservedRoot === '_root') expect(store.listPendingMutationIdsSync().state).toBe('unreadable');
   expect(fs.readFileSync(path.join(outside, 'sentinel'), 'utf8')).toBe('keep');
 });
 
@@ -165,25 +167,6 @@ async function stampLegacyOrganizationInstall(id = 'hello', withSkill = false): 
   await plantLegacyInstall(id, withSkill);
   manager.list();
   await manager.commitPendingNamespace(id, 'acme', 'market-organization');
-}
-
-async function plantInterruptedRelocation(): Promise<{ dest: string; receipts: GhostInstallReceiptStore }> {
-  await stampLegacyOrganizationInstall();
-  const dest = path.join(rootDir, '_ns', 'acme', 'hello');
-  await fs.promises.mkdir(path.dirname(dest), { recursive: true });
-  await fs.promises.rename(path.join(rootDir, 'hello'), dest);
-  const receipts = receiptStore(mutateSnapshot);
-  const current = receipts.read('hello');
-  expect(current.state).toBe('approved');
-  if (current.state !== 'approved') throw new Error('expected approved receipt');
-  await receipts.write(current.receipt, {
-    relId: '_ns/acme/hello', requireSkillSnapshot: false, skillSourceDir: dest,
-  });
-  await receipts.remove('hello');
-  await receipts.writePendingMutation('hello', {
-    kind: 'relocate', fromRelId: 'hello', toRelId: '_ns/acme/hello',
-  });
-  return { dest, receipts };
 }
 
 describe('GhostManager namespace migration census', () => {
@@ -821,177 +804,84 @@ describe('GhostManager namespace migration census', () => {
     expect(manager.list()).toEqual([]);
   });
 
-  it('lets a root plugin occupy the original directory after an in-place namespaced stamp', async () => {
+  it('installs a same-name root without moving or stopping an approved legacy organization', async () => {
     await stampLegacyOrganizationInstall();
-    const committed: string[] = [];
-    manager = createManager({
-      mutateSnapshot,
-      onPhysicalRelocated: async () => undefined,
-      onPhysicalRelocateCommitted: (toRelId) => {
-        committed.push(toRelId);
-        expect(manager.list()).toEqual([
-          expect.objectContaining({ namespace: 'acme', dir: path.join(rootDir, '_ns', 'acme', 'hello') }),
-        ]);
-      },
-    });
+    const before = receiptStore(mutateSnapshot).read('hello');
+    const busy = vi.fn(() => true);
+    manager = createManager({ mutateSnapshot, isNamespaceMigrationBusy: busy });
     const rootCindy = await makeCindy('hello');
     await expect(manager.install(rootCindy)).resolves.toMatchObject({
-      ghost: { manifest: { id: 'hello' }, dir: path.join(rootDir, 'hello') },
+      ghost: { namespace: null, dir: path.join(rootDir, '_root', 'hello') },
     });
-    expect(fs.existsSync(path.join(rootDir, '_ns', 'acme', 'hello', 'ghost.json'))).toBe(true);
-    expect(committed).toEqual(['_ns/acme/hello']);
-    expect(manager.list().map((ghost) => [ghost.namespace ?? null, ghost.manifest.id, ghost.dir])).toEqual(
-      expect.arrayContaining([
-        ['acme', 'hello', path.join(rootDir, '_ns', 'acme', 'hello')],
-        [null, 'hello', path.join(rootDir, 'hello')],
-      ]),
-    );
-  });
-
-  it('retains the relocation journal until interrupted user-data moves succeed', async () => {
-    await stampLegacyOrganizationInstall();
-    let calls = 0;
-    manager = createManager({
-      mutateSnapshot,
-      onPhysicalRelocated: async () => {
-        calls += 1;
-        if (calls === 1) throw new Error('data move interrupted');
-      },
-    });
-    const rootCindy = await makeCindy('hello');
-    await expect(manager.install(rootCindy)).resolves.toMatchObject({
-      rejection: { code: 'io' },
-    });
-    const receipts = receiptStore(async () => undefined);
-    expect(calls).toBe(1);
-    expect(receipts.readPendingMutationSync('hello').state).toBe('valid');
-    expect(fs.existsSync(path.join(rootDir, 'hello', 'ghost.json'))).toBe(false);
-    expect(fs.existsSync(path.join(rootDir, '_ns', 'acme', 'hello'))).toBe(true);
-    expect(manager.list().some((ghost) => ghost.approval.state === 'approved')).toBe(false);
-    await expect(manager.install(rootCindy)).resolves.toMatchObject({ rejection: { code: 'io' } });
-    expect(receipts.readPendingMutationSync('hello').state).toBe('valid');
-    manager = createManager({
-      mutateSnapshot,
-      onPhysicalRelocated: async () => { calls += 1; },
-    });
-    await expect.poll(() => receipts.readPendingMutationSync('hello').state).toBe('missing');
-    expect(calls).toBe(2);
-    expect(manager.list()).toEqual([expect.objectContaining({ namespace: 'acme' })]);
-  });
-
-  it.each([
-    ['retries user-data relocate when content already moved', false],
-    ['retries a failed startup relocation after the database becomes ready', true],
-  ] as const)('%s', async (_name, startsBeforeDbReady) => {
-    const { dest, receipts } = await plantInterruptedRelocation();
-    let ready = !startsBeforeDbReady;
-    let attempts = 0;
-    manager = createManager({
-      mutateSnapshot,
-      onPhysicalRelocated: async () => {
-        attempts += 1;
-        if (!ready) throw new Error('DbClient not ready');
-      },
-    });
-    if (startsBeforeDbReady) {
-      await expect.poll(() => attempts).toBe(1);
-      expect(receipts.readPendingMutationSync('hello').state).toBe('valid');
-      ready = true;
-      await manager.retryInterruptedMutationsAfterDbReady();
-      expect(attempts).toBe(2);
-      expect(receipts.readPendingMutationSync('hello').state).toBe('missing');
-    } else {
-      await expect.poll(() => receipts.readPendingMutationSync('hello').state).toBe('missing');
-      expect(attempts).toBe(1);
-    }
-    expect(manager.list()).toEqual([expect.objectContaining({ namespace: 'acme', dir: dest })]);
-  });
-
-  it('serializes interrupted relocation recovery before uninstalling and reinstalling its destination', async () => {
-    const { dest, receipts } = await plantInterruptedRelocation();
-    let finish!: () => void;
-    let started!: () => void;
-    const ready = new Promise<void>((resolve) => { started = resolve; });
-    const gate = new Promise<void>((resolve) => { finish = resolve; });
-    manager = createManager({ mutateSnapshot, onPhysicalRelocated: async () => { started(); await gate; } });
-    await ready;
-    let uninstalled = false;
-    const replacement = manager.uninstall('_ns/acme/hello').then(async () => {
-      uninstalled = true;
-      return manager.install(await makeCindy('hello'), { namespace: 'acme' });
-    });
-    await new Promise<void>((resolve) => setTimeout(resolve, 30));
-    const overlapped = uninstalled;
-    finish();
-    await replacement;
-    await manager.retryInterruptedMutationsAfterDbReady();
-    expect(overlapped).toBe(false);
-    expect(receipts.readPendingMutationSync('hello').state).toBe('missing');
-    expect(manager.list()).toEqual([expect.objectContaining({ dir: dest, approval: expect.objectContaining({ state: 'approved' }) })]);
-  });
-
-  it.each(['receipt', 'journal'] as const)('does not commit interrupted relocation after its %s is superseded', async (changed) => {
-    const { dest, receipts } = await plantInterruptedRelocation();
-    let finish!: () => void;
-    let started!: () => void;
-    const ready = new Promise<void>((resolve) => { started = resolve; });
-    const gate = new Promise<void>((resolve) => { finish = resolve; });
-    const warn = vi.fn();
-    const committed = vi.fn();
-    manager = createManager({
-      mutateSnapshot, onPhysicalRelocated: async () => { started(); await gate; },
-      onPhysicalRelocateCommitted: committed, log: { info: vi.fn(), warn },
-    });
-    await ready;
-    if (changed === 'receipt') {
-      const approval = receipts.readForRecovery('_ns/acme/hello');
-      if (approval.state !== 'approved') throw new Error('expected destination approval');
-      await receipts.write({ ...approval.receipt, revision: '22222222-2222-4222-8222-222222222222' }, {
-        relId: '_ns/acme/hello', requireSkillSnapshot: false, skillSourceDir: dest,
-      });
-    } else {
-      await receipts.writePendingMutation('hello', { kind: 'relocate', fromRelId: 'hello', toRelId: '_ns/acme/other' });
-    }
-    const expectedApproval = receipts.readForRecovery('_ns/acme/hello');
-    const expectedMarker = receipts.readPendingMutationSync('hello');
-    finish();
-    await vi.waitFor(() => expect(warn).toHaveBeenCalledWith('ghost relocate recovery side effect failed', expect.anything()));
-    expect(committed).not.toHaveBeenCalled();
-    expect(receipts.readPendingMutationSync('hello')).toEqual(expectedMarker);
-    expect(receipts.readForRecovery('_ns/acme/hello')).toEqual(expectedApproval);
-  });
-
-  it('stops the physical instance before renaming it out of the way', async () => {
-    await stampLegacyOrganizationInstall();
-    const seen: string[] = [];
-    manager = createManager({
-      mutateSnapshot,
-      onBeforePhysicalRelocate: (fromRelId) => {
-        seen.push(fromRelId);
-        expect(fs.existsSync(path.join(rootDir, 'hello', 'ghost.json'))).toBe(true);
-        expect(fs.existsSync(path.join(rootDir, '_ns', 'acme', 'hello'))).toBe(false);
-      },
-    });
-    const rootCindy = await makeCindy('hello');
-    await expect(manager.install(rootCindy)).resolves.toMatchObject({
-      ghost: { manifest: { id: 'hello' }, dir: path.join(rootDir, 'hello') },
-    });
-    expect(seen).toEqual(['hello']);
-    expect(fs.existsSync(path.join(rootDir, '_ns', 'acme', 'hello', 'ghost.json'))).toBe(true);
-  });
-
-  it('leaves the approved occupant usable when preflight finds conflicting user data', async () => {
-    await stampLegacyOrganizationInstall();
-    manager = createManager({
-      mutateSnapshot,
-      onValidatePhysicalRelocation: () => { throw new Error('relocate destination already exists'); },
-    });
-    const rootCindy = await makeCindy('hello');
-    await expect(manager.install(rootCindy)).resolves.toMatchObject({ rejection: { code: 'io' } });
+    expect(busy).not.toHaveBeenCalled();
+    expect(receiptStore(mutateSnapshot).read('hello')).toEqual(before);
     expect(fs.existsSync(path.join(rootDir, 'hello', 'ghost.json'))).toBe(true);
-    expect(manager.list()).toEqual([expect.objectContaining({ approval: expect.objectContaining({ state: 'approved' }) })]);
-    const receipts = receiptStore(async () => undefined);
-    expect(receipts.readPendingMutationSync('hello').state).toBe('missing');
+    expect(fs.existsSync(path.join(rootDir, '_ns', 'acme', 'hello'))).toBe(false);
+    expect(manager.list().map((ghost) => [ghost.namespace, ghost.dir])).toEqual(expect.arrayContaining([
+      ['acme', path.join(rootDir, 'hello')], [null, path.join(rootDir, '_root', 'hello')],
+    ]));
+    const { installedGhostStoragePart } = await import('../../../shared/pluginIdentity.js');
+    expect(manager.list().map(installedGhostStoragePart).sort()).toEqual(['_root__hello', 'hello']);
+    manager = createManager({ mutateSnapshot });
+    expect(manager.list()).toHaveLength(2);
+    await expect(manager.setEnabled('_root/hello', false)).resolves.toEqual({ ok: true });
+    expect(manager.list().find((ghost) => ghost.namespace === 'acme')?.enabled).toBe(true);
+    await expect(manager.uninstall('_root/hello')).resolves.toEqual({ ok: true });
+    expect(manager.list()).toEqual([expect.objectContaining({ namespace: 'acme', dir: path.join(rootDir, 'hello') })]);
+  });
+
+  it.each([null, 'acme'] as const)('updates a legacy %s installation in place', async (namespace) => {
+    await plantLegacyInstall('hello', true);
+    manager.list();
+    await manager.commitPendingNamespace('hello', namespace, namespace === null ? 'explicit-root' : 'market-organization');
+    const ghost = manager.list()[0];
+    const { ghostInstallApprovalToken } = await import('../../../shared/ghost.js');
+    await expect(manager.update(await makeCindy('hello'), {
+      namespace, expectedInstalledApproval: ghostInstallApprovalToken(ghost.approval),
+    })).resolves.toMatchObject({ ghost: { namespace, dir: path.join(rootDir, 'hello') } });
+    expect(fs.existsSync(path.join(rootDir, '_root', 'hello'))).toBe(false);
+    expect(fs.existsSync(path.join(rootDir, '_ns', 'acme', 'hello'))).toBe(false);
+  });
+
+  it('does not let an absent new root instance mutate a same-name legacy root', async () => {
+    await plantLegacyInstall('hello');
+    manager.list();
+    await manager.commitPendingNamespace('hello', null, 'explicit-root');
+    const before = receiptStore().read('hello');
+    expect(await manager.setEnabled('_root/hello', false)).toMatchObject({ rejection: { code: 'not-installed' } });
+    expect(await manager.uninstall('_root/hello')).toMatchObject({ rejection: { code: 'not-installed' } });
+    expect(await manager.removeInstallApproval('_root/hello')).toBe(true);
+    expect(receiptStore().read('hello')).toEqual(before);
+    expect(manager.list()).toEqual([expect.objectContaining({ enabled: true, dir: path.join(rootDir, 'hello') })]);
+  });
+
+  it.each(['_root', '_ns/acme', '_ns/acme/org-helper'])('keeps other installs visible when %s is temporarily unreadable', async (unreadable) => {
+    await manager.install(await makeCindy('hello'));
+    await manager.install(await makeCindy('org-helper'), { namespace: 'acme' });
+    const target = path.join(rootDir, ...unreadable.split('/'));
+    const realLstat = fs.lstatSync;
+    const locked = vi.spyOn(fs, 'lstatSync').mockImplementation((filePath, options) => {
+      if (String(filePath) === target) throw Object.assign(new Error('locked'), { code: 'EACCES' });
+      return realLstat(filePath, options as never);
+    });
+    try {
+      expect(manager.list().map((ghost) => ghost.manifest.id)).toEqual([unreadable === '_root' ? 'org-helper' : 'hello']);
+    } finally {
+      locked.mockRestore();
+    }
+  });
+
+  it('keeps the legacy organization approved when a new root package cannot be installed', async () => {
+    await stampLegacyOrganizationInstall('hello', true);
+    const before = receiptStore(mutateSnapshot).read('hello');
+    const file = await writeTestCindyPackage(path.join(workDir, 'root-with-skill.cindy'), {
+      ...manifest('hello'), slots: ['tool', 'skill'],
+      skill: { items: [{ dir: 'skills/demo', name: 'demo', description: 'Demo skill' }] },
+    }, { 'main.js': '// ok\n', 'skills/demo/SKILL.md': '---\nname: demo\ndescription: Demo skill\n---\n\nDemo\n' });
+    manager = createManager({ mutateSnapshot: async () => { throw new Error('snapshot unavailable'); } });
+    await expect(manager.install(file)).resolves.toMatchObject({ rejection: { code: 'io' } });
+    expect(receiptStore(mutateSnapshot).read('hello')).toEqual(before);
+    expect(manager.list()).toEqual([expect.objectContaining({ namespace: 'acme', approval: expect.objectContaining({ state: 'approved' }) })]);
   });
 
   it('installs and verifies a namespaced skill snapshot under its physical identity', async () => {
@@ -1010,7 +900,7 @@ describe('GhostManager namespace migration census', () => {
     await expect(manager.verifyApprovedSkillSnapshot(result.ghost)).resolves.toBe(true);
   });
 
-  it('keeps a stamped skill approved after vacating for a same-name root install', async () => {
+  it('keeps a stamped skill approved beside a same-name new root install', async () => {
     await stampLegacyOrganizationInstall('hello', true);
     const rootCindy = await makeCindy('hello');
     await expect(manager.install(rootCindy)).resolves.toMatchObject({ ghost: { manifest: { id: 'hello' } } });

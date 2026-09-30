@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
-import ts from 'typescript';
+import { createGhostProductionCallbacks } from './ghostProductionCallbacksFixture.js';
 import { describe, expect, it, vi } from 'vitest';
 import type { InstalledGhost } from '../../../shared/ghost.js';
 import { ghostExternalLinkUrls } from '../../../shared/ghost.js';
@@ -11,33 +11,14 @@ import { PluginDownloadSlot } from '../downloadSlot.js';
 import { GhostExternalLinkGate } from '../previewGate.js';
 import { runGhostExternalLinkNavigation } from '../ghostExternalLinkNavigation.js';
 
-function productionAssembly(deps: Record<string, unknown>): {
+const productionAssembly = createGhostProductionCallbacks<{
   pluginDownloads: PluginDownloadSlot;
   handleGhostExternalLinkNavigation: (...args: unknown[]) => void;
-} {
-  const source = fs.readFileSync(new URL('../index.ts', import.meta.url), 'utf8');
-  const ast = ts.createSourceFile('index.ts', source, ts.ScriptTarget.Latest, true);
-  const names = new Set(['findAvailableGhost', 'findGhostForInstanceId', 'getGhostExternalLinkGate', 'handleGhostExternalLinkNavigation']);
-  const declarations: string[] = [];
-  const visit = (node: ts.Node): void => {
-    if (ts.isFunctionDeclaration(node) && node.name && names.has(node.name.text)) {
-      declarations.push(node.getText(ast).replace(/^export /, ''));
-    }
-    if (ts.isVariableDeclaration(node) && node.name.getText(ast) === 'pluginDownloads') {
-      declarations.push('const ' + node.getText(ast));
-    }
-    ts.forEachChild(node, visit);
-  };
-  visit(ast);
-  if (declarations.length !== names.size + 1) throw new Error('Production instance assembly missing');
-  const compiled = ts.transpileModule(declarations.join(';'), {
-    compilerOptions: { target: ts.ScriptTarget.ES2022 },
-  }).outputText;
-  return new Function('deps',
-    'const {' + Object.keys(deps).join(',') + '} = deps; let externalLinkGateSingleton = null;' + compiled +
-    ';return {pluginDownloads, handleGhostExternalLinkNavigation};',
-  )(deps);
-}
+}>({
+  functions: ['findAvailableGhost', 'findGhostForInstanceId', 'getGhostExternalLinkGate', 'handleGhostExternalLinkNavigation'],
+  variables: ['pluginDownloads'],
+  initialize: 'let externalLinkGateSingleton = null;',
+});
 
 function installed(namespace?: string | null, inPlace = false): InstalledGhost {
   return {

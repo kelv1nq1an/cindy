@@ -36,18 +36,11 @@ import { isDeepStrictEqual } from 'node:util';
 import { supportsCindyVersion } from '@cindy/plugin-protocol';
 import { buildGhostRecommendationSnapshot } from './ghostRecommendationSnapshot.js';
 import {
-  isGhostOptionalRelocationSource,
-  prepareGhostOptionalRelocation,
-  readyGhostOptionalRelocation,
-  retryGhostOptionalRelocations,
-} from './ghostOptionalRelocation.js';
-import {
   readGhostRecommendationEntries,
   replaceGhostRecommendations,
   markGhostRecommendationInstalled,
   consumeGhostRecommendationPriority,
   forgetGhostRecommendations,
-  relocateGhostRecommendations,
 } from './ghostRecommendationStore.js';
 
 import { createLogger } from '../logger.js';
@@ -76,7 +69,6 @@ import {
   ghostWebviewEntryPaths,
   isCindyAccountGhostId,
   isUserInstallReservedGhostId,
-  isValidGhostId,
   layoutWithGhostPanel,
   type GhostHostNoticeKey,
   type GhostManifest,
@@ -106,12 +98,7 @@ import {
   type AppSessionMode,
 } from '../appSessionState.js';
 import { getLayoutStore } from '../layout/index.js';
-import { relocateHiddenMainViewGhostId } from '../sidebarSettingsStore.js';
-import {
-  assertGhostUserDataPathsCanRelocate,
-  ghostUserDataRelocationPaths,
-  relocateGhostUserDataResources,
-} from './ghostUserDataRelocation.js';
+import { relocateGhostUserDataResources } from './ghostUserDataRelocation.js';
 import {
   GhostManager,
   type GhostExclusiveMutation,
@@ -145,7 +132,8 @@ import {
   parsePluginInstallRelId,
   parsePluginInstanceId,
   parsePluginStoragePart,
-  pluginInstallRelId,
+  pluginInstallStoragePart,
+  isValidPluginInstallRelId,
   pluginStoragePart,
   resolveInstalledGhost,
   hasDeliveryNamespace,
@@ -181,8 +169,6 @@ import {
   electronSandboxAdapter,
   ensureGhostProtocolRegistered,
   revokeLegacyGhostProtocolPartition,
-  resumeGhostProtocolAfterRelocation,
-  suspendGhostProtocolForRelocation,
   ghostIdForLogicWebContents,
   sendToGhostLogic,
   setGhostAppContextProvider,
@@ -449,7 +435,6 @@ import {
   readGhostSecretTail,
   removeGhostSecret,
   migrateGhostSecrets,
-  assertGhostSecretsCanRelocate,
   removeGhostSecrets,
   setMivoSecretAliasVerifier,
   storeGhostSecret,
@@ -508,7 +493,6 @@ import {
   forgetGhostRecentUsage,
   loadGhostRecentIds,
   markGhostRecentlyUsed,
-  relocateGhostRecentUsage,
 } from './ghostRecentUsageStore.js';
 import { createXaiImageChannel } from './xaiImageClient.js';
 import {
@@ -1415,7 +1399,7 @@ function assertGhostRelocationIdle(part: string): void {
 }
 
 async function relocateGhostUserData(
-  fromPart: string, toPart: string, moveUiReferences: boolean,
+  fromPart: string, toPart: string,
 ): Promise<void> {
   if (fromPart === toPart) return;
   assertGhostRelocationIdle(fromPart);
@@ -1465,13 +1449,7 @@ async function relocateGhostUserData(
         await reassignGhostCards(from, to);
       },
       unread: relocateGhostUnread,
-      ui: async (from, to) => {
-        await getLayoutStore().relocateGhostPanels(from, to);
-        assertCurrent();
-        await relocateHiddenMainViewGhostId(from, to);
-        assertCurrent();
-      },
-    }, moveUiReferences);
+    });
   } finally {
     try {
       await slot.disposeGhost(fromPart);
@@ -1481,18 +1459,6 @@ async function relocateGhostUserData(
       slot.setRelocating(toPart, false);
     }
   }
-}
-
-function relocateGhostOptionalHistory(fromId: string, toId: string): void {
-  relocateGhostRecommendations(fromId, toId);
-  relocateGhostRecentUsage(fromId, toId);
-}
-
-function logGhostOptionalRelocationError(error: unknown, fromId: string): void {
-  log.warn('ghost optional history relocation deferred', {
-    fromId,
-    error: error instanceof Error ? error.message : String(error),
-  });
 }
 
 /** 单轮对账:一次性 legacy 迁移 → 播种 → (有变化时)广播 + 首装停靠 + 常驻点火。 */
@@ -1811,78 +1777,11 @@ export function getGhostManager(): GhostManager {
           if (ghost) spawnIfResident(ghost);
         });
       },
-      onBeforePhysicalRelocate: async (fromRelId) => {
-        const ghost = findGhostForInstanceId(fromRelId);
-        if (ghost) suspendGhostProtocolForRelocation(ghost);
-        const identity = parsePluginInstallRelId(fromRelId);
-        if (!identity) throw new Error('relocate identity is invalid');
-        const part = ghost ? installedGhostStoragePart(ghost) : pluginStoragePart(identity);
-        getGhostOauthAccountManager().invalidateGhost(part);
-        getGhostRuntime().stop(part);
-        await getGhostNodeRuntimeBroker().stopAndWait(part);
-        getGhostRuntime().resetFuse(part);
-        assertGhostRelocationIdle(part);
-        getGhostAgentSlot().clearGhost(part);
-        getGhostErrandSlot().clearGhost(part);
-      },
-      onValidatePhysicalRelocation: async (fromRelId, toRelId) => {
-        assertGhostRelocationDbReady();
-        const fromIdentity = parsePluginInstallRelId(fromRelId);
-        const toIdentity = parsePluginInstallRelId(toRelId);
-        if (!fromIdentity || !toIdentity) throw new Error('relocate identities are invalid');
-        const fromPart = pluginStoragePart(fromIdentity);
-        const toPart = pluginStoragePart(toIdentity);
-        assertGhostRelocationIdle(fromPart);
-        assertGhostUserDataPathsCanRelocate(
-          ghostUserDataRelocationPaths(fromPart, toPart, ownerScopedUserDataPath),
-        );
-        assertGhostSecretsCanRelocate(fromPart, toPart);
-        await getGhostLibraryBindingStore().assertCanRelocateBinding(fromPart, toPart);
-      },
-      onPhysicalRelocateAborted: (fromRelId) => {
-        const ghost = findGhostForInstanceId(fromRelId);
-        if (ghost) resumeGhostProtocolAfterRelocation(ghost);
-        if (ghost) spawnIfResident(ghost);
-      },
-      onPhysicalRelocateCommitted: (toRelId) => {
-        const ghost = findGhostForInstanceId(toRelId);
-        if (ghost) resumeGhostProtocolAfterRelocation(ghost);
-        if (ghost) spawnIfResident(ghost);
-        const identity = parsePluginInstallRelId(toRelId);
-        if (identity && identity.namespace !== null) {
-          try {
-            ghostPhysicalRelocationObserver?.(identity.ghostId, pluginStoragePart(identity));
-          } catch (error) {
-            log.warn('ghost panel relocation failed', {
-              error: error instanceof Error ? error.message : String(error),
-            });
-          }
-        }
-      },
-      onPhysicalRelocated: async (fromRelId, toRelId) => {
-        assertGhostRelocationDbReady();
-        const releaseMutation = beginGhostMutation(captureGhostMutationOwner());
-        try {
-          const fromIdentity = parsePluginInstallRelId(fromRelId);
-          const toIdentity = parsePluginInstallRelId(toRelId);
-          if (!fromIdentity || !toIdentity) {
-            throw new Error('relocate identities are invalid');
-          }
-          const fromPart = pluginStoragePart(fromIdentity);
-          const toPart = pluginStoragePart(toIdentity);
-          prepareGhostOptionalRelocation(fromPart, toPart);
-          await relocateGhostUserData(fromPart, toPart, true);
-          readyGhostOptionalRelocation(fromPart, toPart);
-          retryGhostOptionalRelocations(relocateGhostOptionalHistory, logGhostOptionalRelocationError);
-        } finally {
-          releaseMutation();
-        }
-      },
       onArchiveSourceState: async (fromPart, archivePart) => {
         assertGhostRelocationDbReady();
         const releaseMutation = beginGhostMutation(captureGhostMutationOwner());
         try {
-          await relocateGhostUserData(fromPart, archivePart, false);
+          await relocateGhostUserData(fromPart, archivePart);
         } finally {
           releaseMutation();
         }
@@ -1953,8 +1852,7 @@ export function getGhostRuntime(): GhostRuntime {
       // 关闭(沉睡)/ 重载都由用户在面板上决定,主机只记日志。
       onFused: (id) => log.warn('ghost fused after repeated crashes', { id }),
       onStateChanged: (id, state) => {
-        const identity = parsePluginInstallRelId(id);
-        const storagePart = identity ? pluginStoragePart(identity) : id;
+        const storagePart = isValidPluginInstallRelId(id) ? pluginInstallStoragePart(id) : id;
         log.info('ghost runtime state', { id, state });
         if (state !== 'running') disconnectRoutineSource(storagePart);
         // 崩溃/熄灯时把该意识名下的在途工具调用收掉(结构化失败给 agent)。
@@ -7239,11 +7137,13 @@ export async function uninstallGhostAndCleanup(
   if (!identity) {
     throwIpcError('INVALID_PARAMS', 'id must be a valid Ghost id');
   }
-  return withGhostInstallLock(identity.ghostId, () =>
-    withActiveOwnerGhostOauthMutationLock(pluginStoragePart(identity), () =>
+  return withGhostInstallLock(identity.ghostId, () => {
+    const ghost = findGhostForInstanceId(id);
+    if (!ghost) throwIpcError('NOT_FOUND', '目标插件实例已不存在');
+    return withActiveOwnerGhostOauthMutationLock(installedGhostStoragePart(ghost), () =>
       uninstallGhostAndCleanupLocked(id, options),
-    ),
-  );
+    );
+  });
 }
 
 async function uninstallGhostAndCleanupLocked(
@@ -7253,35 +7153,20 @@ async function uninstallGhostAndCleanupLocked(
   const releaseMutation = beginGhostMutation();
   try {
     requireGhostAvailableForActiveSession(id);
-    const ghost =
-      findGhostForInstanceId(id) ??
-      (() => {
-        const rel = parsePluginInstallRelId(id);
-        return rel ? findInstalledGhostByIdentity(availableGhosts(), rel) ?? null : null;
-      })();
-    const identity = ghost
-      ? installedGhostLogicalIdentity(ghost)
-      : parsePluginInstallRelId(id) ??
-        parsePluginStoragePart(id) ??
-        (isValidGhostId(id) ? createPluginLogicalIdentity(null, id) : null);
-    if (!identity) {
-      throwIpcError('INVALID_PARAMS', 'id must be a valid Ghost id');
-    }
+    const ghost = findGhostForInstanceId(id);
+    if (!ghost) throwIpcError('NOT_FOUND', '目标插件实例已不存在');
     // In-place migrated org plugins keep the original directory. Physical keys
     // must follow that directory, not the namespaced logical identity.
-    const { relId, storagePart } = ghost
-      ? installedGhostPhysicalKeys(ghost)
-      : { relId: pluginInstallRelId(identity), storagePart: pluginStoragePart(identity) };
-    const ghostId = identity.ghostId;
+    const { relId, storagePart } = installedGhostPhysicalKeys(ghost);
     getBotAuthorizationService()?.invalidatePlugin(storagePart);
     const completeLedger =
       options?.skipMarketLedger === true
         ? null
-        : (prepareGhostUninstallLedgerCompletion?.(ghost ?? id) ?? null);
+        : (prepareGhostUninstallLedgerCompletion?.(ghost) ?? null);
     const manager = getGhostManager();
     const runtime = getGhostRuntime();
     // Library 的 orphaned 标记要在 uninstall 之前取显示名(收走后 list 里就没了)。
-    const libraryDisplayName = ghost?.manifest.name ?? ghostId;
+    const libraryDisplayName = ghost.manifest.name;
     runtime.stop(storagePart);
     await getGhostNodeRuntimeBroker().stopAndWait(storagePart);
     getGhostAgentSlot().clearGhost(storagePart);
@@ -8235,12 +8120,11 @@ export function registerGhostIpc(): void {
       return;
     }
     try {
-      retryGhostOptionalRelocations(relocateGhostOptionalHistory, logGhostOptionalRelocationError);
       event.returnValue = buildGhostRecommendationSnapshot(
         getActiveAppSession().dataOwnerId,
         availableGhosts(),
-        readGhostRecommendationEntries().filter((entry) => !isGhostOptionalRelocationSource(entry.id)),
-        loadGhostRecentIds().filter((id) => !isGhostOptionalRelocationSource(id)),
+        readGhostRecommendationEntries(),
+        loadGhostRecentIds(),
       );
     } catch {
       log.warn('ghost recommendation snapshot unavailable');
@@ -8252,8 +8136,7 @@ export function registerGhostIpc(): void {
   // publisher-owned manifest；同步读保证列表首帧不先按扫描序再跳成最近序。
   ipcMain.on('ghosts:recent-usage', (event) => {
     try {
-      retryGhostOptionalRelocations(relocateGhostOptionalHistory, logGhostOptionalRelocationError);
-      event.returnValue = { ids: loadGhostRecentIds().filter((id) => !isGhostOptionalRelocationSource(id)) };
+      event.returnValue = { ids: loadGhostRecentIds() };
     } catch (error) {
       // 最近使用只是快捷行排序元数据，不得因配置文件损坏 /
       // 权限异常阻断 Plugin 页首屏。main 记录后空历史降级。
@@ -8990,15 +8873,8 @@ export function registerGhostIpc(): void {
       throwIpcError('INVALID_PARAMS', 'enabled must be a boolean');
     }
     const target = findGhostForInstanceId(id);
-    const identity = target
-      ? installedGhostLogicalIdentity(target)
-      : parsePluginInstallRelId(id) ?? parsePluginStoragePart(id) ?? (isValidGhostId(id) ? createPluginLogicalIdentity(null, id) : null);
-    if (!identity) {
-      throwIpcError('INVALID_PARAMS', 'id must be a valid Ghost id');
-    }
-    const { relId, storagePart } = target
-      ? installedGhostPhysicalKeys(target)
-      : { relId: pluginInstallRelId(identity), storagePart: pluginStoragePart(identity) };
+    if (!target) throwIpcError('NOT_FOUND', '目标插件实例已不存在');
+    const { relId, storagePart } = installedGhostPhysicalKeys(target);
     // 同 install/update 的 owner 租约:setEnabled 先 await pathExists(旧 owner 的
     // 安装目录)再动态写 receipt —— 不持租约,这个异步窗口里切号落定会拿 A 的镜像
     // 状态改 B 的 receipt(启停同时落在两个 owner 的两半)。
@@ -9020,8 +8896,7 @@ export function registerGhostIpc(): void {
       if ('rejection' in result) throwUninstallError(result.rejection);
       if (enabled) {
         runtime.resetFuse(storagePart); // 重新唤醒 = 清熔断记账,可再拉起
-        const ghost = target ?? findGhostForInstanceId(id);
-        if (ghost) spawnIfResident(ghost); // 常驻意识:唤醒即启动
+        spawnIfResident(target);
         resumeGhostUnreadProjection(id); // 沉睡期间保留的那颗点回来(#1421)
         await refreshMivoLibraryExtraDirGrant().catch((error) => {
           log.warn('library extraDirs enable sync failed', {
@@ -9551,13 +9426,6 @@ function scheduleGhostSkillReconcile(): void {
 }
 
 let ghostsChangedObserver: ((ghosts: InstalledGhost[]) => void) | null = null;
-let ghostPhysicalRelocationObserver: ((fromId: string, toId: string) => void) | null = null;
-
-export function setGhostPhysicalRelocationObserver(
-  observer: ((fromId: string, toId: string) => void) | null,
-): void {
-  ghostPhysicalRelocationObserver = observer;
-}
 
 /**
  * bootstrap 注入:装/卸/启停/换版广播的 main 侧同步观察者(当前消费方:插件面板

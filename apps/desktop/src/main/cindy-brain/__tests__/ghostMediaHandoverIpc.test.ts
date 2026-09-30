@@ -1,5 +1,4 @@
-import fs from 'node:fs';
-import ts from 'typescript';
+import { createGhostProductionCallbacks } from './ghostProductionCallbacksFixture.js';
 import { describe, expect, it, vi } from 'vitest';
 
 import { type InstalledGhost } from '../../../shared/ghost';
@@ -7,28 +6,10 @@ import { installedGhostStoragePart, isGhostInstanceId } from '../../../shared/pl
 import { ghostMediaHandoverTargetTracker, resolveGhostMediaHandoverTarget } from '../ghostMediaHandoverTargetTracker';
 import { parseGhostPanelMediaUrl, resolveGhostPanelMedia } from '../previewGate';
 
-function loadHandler() {
-  const source = fs.readFileSync(new URL('../index.ts', import.meta.url), 'utf8');
-  const ast = ts.createSourceFile('index.ts', source, ts.ScriptTarget.Latest, true);
-  let handler: ts.Expression | undefined;
-  const visit = (node: ts.Node): void => {
-    if (ts.isCallExpression(node) && node.expression.getText(ast) === 'ipcMain.handle'
-      && ts.isStringLiteral(node.arguments[0]) && node.arguments[0].text === 'ghosts:resolve-panel-media') {
-      handler = node.arguments[1];
-    }
-    ts.forEachChild(node, visit);
-  };
-  visit(ast);
-  if (!handler) throw new Error('Panel media IPC handler missing');
-  const compiled = ts.transpileModule('const handler = ' + handler.getText(ast), {
-    compilerOptions: { target: ts.ScriptTarget.ES2022 },
-  }).outputText;
-  return new Function('deps', 'const { throwIpcError, isGhostInstanceId, resolveGhostMediaHandoverTarget, parseGhostPanelMediaUrl, findAvailableGhostForAuthorization, findGhostForInstanceId, ghostInstallMutationTargetFor, installedGhostStoragePart, resolveGhostPanelMedia, ledger, blobStore, fs } = deps;' + compiled + ';return handler;') as (
-    deps: Record<string, unknown>,
-  ) => (event: unknown, uri: unknown, purpose?: unknown, instanceId?: unknown, sourceToken?: unknown) => Promise<unknown>;
-}
+const createHandler = createGhostProductionCallbacks<{
+  handler: (event: unknown, uri: unknown, purpose?: unknown, instanceId?: unknown, sourceToken?: unknown) => Promise<unknown>;
+}>({ callbacks: { handler: ['ipcMain.handle', 'ghosts:resolve-panel-media'] } });
 
-const createHandler = loadHandler();
 const hash = 'a'.repeat(64);
 const uri = 'cindy-ghost://helper/preview/' + hash + '.png';
 
@@ -41,7 +22,7 @@ function harness() {
     getBlobInfo: vi.fn(async () => ({ ext: '.png', mimeType: 'image/png' })),
   };
   const findAvailable = vi.fn(() => installed.size === 1 ? [...installed.values()][0] : null);
-  const handler = createHandler({
+  const { handler } = createHandler({
     throwIpcError: (code: string, message: string) => { throw Object.assign(new Error(message), { code }); },
     isGhostInstanceId, resolveGhostMediaHandoverTarget, parseGhostPanelMediaUrl, installedGhostStoragePart, resolveGhostPanelMedia,
     findAvailableGhostForAuthorization: findAvailable,

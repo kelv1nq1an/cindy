@@ -30,6 +30,7 @@ const cindy = await import('../cindyPrefsStore.js');
 const errand = await import('../errandPrefsStore.js');
 const pick = await import('../pickGrantsStore.js');
 const workdir = await import('../ghostWorkdirPrefs.js');
+const unread = await import('../ghostUnreadStore.js');
 const cards = await import('../cardStoreDb.js');
 const schema = await import('../../localDb/schema.js');
 let rawDb: Database.Database;
@@ -71,9 +72,9 @@ beforeEach(async () => {
     errandPreferences: errand.relocateGhostErrandPrefs,
     pickedDirectories: pick.relocateGhostPickedDirs,
     workdirPreferences: workdir.relocateGhostWorkdirPrefs,
-    media: noOp, unread: noOp,
+    media: noOp,
     cards: (source, destination) => cards.reassignGhostCards(source, destination, db),
-    ui: (source, destination) => layout.relocateGhostPanels(source, destination),
+    unread: unread.relocateGhostUnread,
   };
   fs.mkdirSync(path.join(root, from), { recursive: true });
   fs.writeFileSync(path.join(root, from, 'ghost.json'), JSON.stringify(manifest));
@@ -91,6 +92,7 @@ beforeEach(async () => {
   errand.writeGhostErrandSessionId(from, 'org-keyed-session', 'draft');
   pick.recordGhostPickedDir(from, '/org-picked');
   workdir.setGhostDisabledForWorkdir('/project', from, true);
+  unread.markGhostUnread(from, 'org activity', 100);
   await cards.upsertGhostCard({
     callId: 'org-card', ghostId: from, sessionId: 'org-session', html: '<p>org</p>',
     height: 240, v: 1, updatedAt: 1,
@@ -99,55 +101,37 @@ beforeEach(async () => {
 
 afterEach(() => { rawDb.close(); fs.rmSync(scope.dir, { recursive: true, force: true }); });
 
-it.each(['secrets', 'errandPreferences', 'cards', 'ui'] as const)(
-  'replays the existing Manager journal after a crash at %s before permitting root reuse',
-  async (crashAt) => {
-    let manager = new GhostManager({ getRootDir: () => root, mutateSnapshot });
-    manager.list();
-    expect(await manager.commitPendingNamespace(from, 'acme', 'market-organization')).toEqual({ ok: true });
-    const broken = { ...resources, [crashAt]: async (source: string, destination: string) => {
-      await resources[crashAt](source, destination);
-      throw new Error('interrupted');
-    } };
-    manager = new GhostManager({ getRootDir: () => root, mutateSnapshot,
-      onPhysicalRelocated: () => relocateGhostUserDataResources(from, to, broken, true),
-    });
-    const file = await writeTestCindyPackage(path.join(scope.dir, 'root.cindy'), manifest);
-    expect(await manager.install(file)).toMatchObject({ rejection: { code: 'io' } });
-    expect(receipts.readPendingMutationSync(from).state).toBe('valid');
-    expect(fs.existsSync(path.join(root, from))).toBe(false);
-    manager = new GhostManager({ getRootDir: () => root, mutateSnapshot,
-      onPhysicalRelocated: () => relocateGhostUserDataResources(from, to, resources, true),
-    });
-    await manager.retryInterruptedMutationsAfterDbReady();
-    expect(receipts.readPendingMutationSync(from).state).toBe('missing');
-    expect(await manager.install(file)).toMatchObject({ ghost: { namespace: null } });
-    expect(cindy.readGhostCindyOverrides(from)).toEqual({});
-    expect(cindy.readGhostCindyOverrides(to)).toEqual({ 'image.generate': 'org-model' });
-    expect(errand.readGhostErrandConfig(from)).toEqual({});
-    expect(errand.readGhostErrandSessionId(from)).toBeNull();
-    expect(errand.readGhostErrandSessionId(from, 'draft')).toBeNull();
-    expect(errand.readGhostErrandSessionId(to)).toBe('org-session');
-    expect(errand.readGhostErrandSessionId(to, 'draft')).toBe('org-keyed-session');
-    expect(pick.isGhostPickedDir(from, '/org-picked')).toBe(false);
-    expect(pick.isGhostPickedDir(to, '/org-picked')).toBe(true);
-    expect(workdir.listDisabledGhostIdsForWorkdir('/project')).toEqual([to]);
-    expect(await cards.getGhostCard('org-card', db)).toMatchObject({ ghostId: to, sessionId: 'org-session' });
-    expect(walkPanes(layout.getLayout())).toContainEqual({ type: 'pane', id: 'org-placement', panelKind: 'ghost:' + to });
-    expect(fs.existsSync(path.join(scope.dir, 'ghost-kv', from + '.json'))).toBe(false);
-    expect(fs.readFileSync(path.join(scope.dir, 'ghost-kv', to + '.json'), 'utf8')).toContain('org');
-  },
-);
+it('installs a same-name root without changing legacy data or UI references', async () => {
+  const archive = vi.fn();
+  const manager = new GhostManager({ getRootDir: () => root, onArchiveSourceState: archive });
+  expect(await manager.commitPendingNamespace(from, 'acme', 'market-organization')).toEqual({ ok: true });
+  const receiptBefore = fs.readFileSync(path.join(scope.dir, 'ghosts-install-state', from + '.json'), 'utf8');
+  const packageFile = await writeTestCindyPackage(path.join(scope.dir, 'root.cindy'), manifest, { 'main.js': 'void 1;' });
+  expect(await manager.install(packageFile)).toMatchObject({ ghost: { namespace: null, dir: path.join(root, '_root', from) } });
+  expect(archive).not.toHaveBeenCalled();
+  expect(fs.readFileSync(path.join(scope.dir, 'ghosts-install-state', from + '.json'), 'utf8')).toBe(receiptBefore);
+  expect(fs.readFileSync(path.join(scope.dir, 'ghost-kv', from + '.json'), 'utf8')).toBe(JSON.stringify({ private: 'org' }));
+  expect(fs.existsSync(path.join(scope.dir, 'ghost-kv', '_root__' + from + '.json'))).toBe(false);
+  expect(cindy.readGhostCindyOverrides(from)['image.generate']).toBe('org-model');
+  expect(errand.readGhostErrandConfig(from)).toMatchObject({ permissionMode: 'auto', workingDir: '/org-workspace' });
+  expect(errand.readGhostErrandSessionId(from, 'draft')).toBe('org-keyed-session');
+  expect(unread.readGhostUnread(from)).toMatchObject({ summary: 'org activity', at: 100 });
+  expect(await cards.getGhostCard('org-card', db)).toMatchObject({ ghostId: from });
+  expect(walkPanes(layout.getLayout())).toContainEqual({ type: 'pane', id: 'org-placement', panelKind: 'ghost:helper' });
+});
 
 it('archives and restores source-owned data without changing logical UI placement', async () => {
   const archive = '_ns__cindy-archive-test__helper';
-  await relocateGhostUserDataResources(from, archive, resources, false);
+  await relocateGhostUserDataResources(from, archive, resources);
   expect(errand.readGhostErrandSessionId(from)).toBeNull();
   expect(await cards.getGhostCard('org-card', db)).toMatchObject({ ghostId: archive });
+  expect(unread.readGhostUnread(from)).toBeNull();
+  expect(unread.readGhostUnread(archive)).toMatchObject({ summary: 'org activity', at: 100 });
   expect(walkPanes(layout.getLayout())).toContainEqual({ type: 'pane', id: 'org-placement', panelKind: 'ghost:helper' });
-  await relocateGhostUserDataResources(archive, from, resources, false);
+  await relocateGhostUserDataResources(archive, from, resources);
   expect(errand.readGhostErrandSessionId(from, 'draft')).toBe('org-keyed-session');
   expect(await cards.getGhostCard('org-card', db)).toMatchObject({ ghostId: from });
+  expect(unread.readGhostUnread(from)).toMatchObject({ summary: 'org activity', at: 100 });
 });
 
 it('stops at an owner change after an asynchronous resource instead of writing later references', async () => {
@@ -156,7 +140,7 @@ it('stops at an owner change after an asynchronous resource instead of writing l
   const guarded = { ...resources, secrets: () => { current = false; }, libraryBinding: binding,
     assertCurrent: () => { if (!current) throw new Error('owner changed'); },
   };
-  await expect(relocateGhostUserDataResources(from, to, guarded, true)).rejects.toThrow('owner changed');
+  await expect(relocateGhostUserDataResources(from, to, guarded)).rejects.toThrow('owner changed');
   expect(binding).not.toHaveBeenCalled();
   expect(errand.readGhostErrandSessionId(from)).toBe('org-session');
 });

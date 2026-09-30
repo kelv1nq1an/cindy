@@ -9,6 +9,7 @@ import {
   parsePluginStoragePart,
   pluginLedgerRecordKey,
   PLUGIN_NS_INSTALL_ROOT,
+  PLUGIN_ROOT_INSTALL_ROOT,
   type PluginLogicalIdentity,
 } from '../../shared/pluginIdentity.js';
 import {
@@ -639,7 +640,9 @@ export class PluginMarketLedger {
   ): PluginMarketInstallationRecord | null {
     if (
       id.startsWith(`${PLUGIN_NS_INSTALL_ROOT}/`) ||
-      id.startsWith(`${PLUGIN_NS_INSTALL_ROOT}__`)
+      id.startsWith(`${PLUGIN_NS_INSTALL_ROOT}__`) ||
+      id.startsWith(`${PLUGIN_ROOT_INSTALL_ROOT}/`) ||
+      id.startsWith(`${PLUGIN_ROOT_INSTALL_ROOT}__`)
     ) {
       const parsed = parsePluginInstallRelId(id) ?? parsePluginStoragePart(id);
       return parsed ? installations[pluginLedgerRecordKey(parsed)] ?? null : null;

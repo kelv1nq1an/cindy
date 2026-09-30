@@ -4,10 +4,8 @@ import {
   coerceLayout,
   createDefaultLayoutPreservingGhostPanels,
   validateLayout,
-  walkPanes,
   type Layout,
 } from '../../shared/layoutTree.js';
-import { createOverrideSettingsFile } from '../maker-host/override-settings-file.js';
 
 /** 布局存档文件名(userData 下)。v1 后缀跟随 schemaVersion,未来迁移换文件名。 */
 export const LAYOUT_FILE_NAME = 'layout.v1.json';
@@ -21,7 +19,6 @@ export interface LayoutStoreLogger {
 export interface LayoutStoreOptions {
   /** 存档文件绝对路径(生产:userData/layout.v1.json;测试:os.tmpdir 下临时目录)。 */
   getFilePath: () => string;
-  scopeKey?: () => string;
   /** 布局变化时通知(index.ts 用它广播 layout:changed 到所有窗口)。 */
   onChanged?: (layout: Layout) => void;
   log?: LayoutStoreLogger;
@@ -49,7 +46,6 @@ export interface LayoutMutationResult {
  */
 export class LayoutStore {
   private cached: Layout | null = null;
-  private relocating = false;
 
   constructor(private readonly options: LayoutStoreOptions) {}
 
@@ -88,7 +84,6 @@ export class LayoutStore {
    * IPC 层负责把 rejection 映射为 throwIpcError,store 保持纯业务返回。
    */
   setLayout(raw: unknown): LayoutMutationResult | { rejection: string } {
-    if (this.relocating) return { rejection: 'layout is relocating' };
     let cloned: Layout;
     try {
       cloned = structuredClone(raw) as Layout;
@@ -104,63 +99,8 @@ export class LayoutStore {
     return { layout: cloned, persisted };
   }
 
-  async relocateGhostPanels(from: string, to: string): Promise<void> {
-    if (from === to) return;
-    if (this.relocating) throw new Error('layout is relocating');
-    const file = this.options.getFilePath();
-    const scopeKey = this.options.scopeKey?.();
-    const relocationStore = createOverrideSettingsFile<Layout>({
-      filePath: this.options.getFilePath,
-      scopeKey: this.options.scopeKey,
-      defaults: {} as Layout,
-      normalize: (raw) => {
-        if (raw && typeof raw === 'object' && Object.keys(raw).length === 0 && !fs.existsSync(file)) {
-          return {} as Layout;
-        }
-        const validation = validateLayout(raw as Layout);
-        if (!validation.ok) throw new Error(`layout is unreadable: ${validation.reason}`);
-        return raw as Layout;
-      },
-      preserveUnreadableFile: true,
-      logLoadedValue: false,
-      log: this.options.log ?? { info: () => {}, warn: () => {} },
-      label: 'layout-relocation',
-    });
-    this.relocating = true;
-    try {
-      let changed = false;
-      const layout = await relocationStore.updateAtomic(({ value }) => {
-        if (Object.keys(value).length === 0) return {};
-        const next = structuredClone(value);
-        const panes = walkPanes(next);
-        if (!panes.some((pane) => pane.panelKind === `ghost:${from}`)) return {};
-        if (panes.some((pane) => pane.panelKind === `ghost:${to}`)) {
-          throw new Error('ghost panel relocation destination collision');
-        }
-        for (const pane of panes) {
-          if (pane.panelKind === `ghost:${from}`) pane.panelKind = `ghost:${to}`;
-        }
-        for (const panel of next.float) {
-          if (panel.panelKind === `ghost:${from}`) panel.panelKind = `ghost:${to}`;
-        }
-        changed = true;
-        return next;
-      }, { preserveDefaults: true });
-      if (file !== this.options.getFilePath() || scopeKey !== this.options.scopeKey?.()) {
-        throw new Error('layout owner scope changed during relocation');
-      }
-      if (changed) {
-        this.cached = layout;
-        this.options.onChanged?.(layout);
-      }
-    } finally {
-      this.relocating = false;
-    }
-  }
-
   /** 重置为默认布局(等价 WoW /resetui):写盘 + 广播。 */
   reset(): LayoutMutationResult {
-    if (this.relocating) throw new Error('layout is relocating');
     const layout = createDefaultLayoutPreservingGhostPanels(this.getLayout());
     this.cached = layout;
     const persisted = this.persist(layout);
@@ -181,7 +121,6 @@ export class LayoutStore {
 
   /** 原子写盘。失败只记日志并返回 false —— 调用方可反馈，但不打断布局内存态。 */
   private persist(layout: Layout): boolean {
-    if (this.relocating) return false;
     const file = this.options.getFilePath();
     const tmp = `${file}.tmp`;
     try {

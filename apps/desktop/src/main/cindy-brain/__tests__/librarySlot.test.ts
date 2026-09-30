@@ -27,6 +27,7 @@ import { initCustomLibraryTree, openExistingCustomLibrary } from '../libraryDirF
 import { createLibraryDbCore, type SqliteDatabaseConstructor } from '../libraryDbCore.js';
 import { LibrarySqlService } from '../librarySqlService.js';
 import { GhostManager } from '../GhostManager.js';
+import { findInstalledGhostByInstanceId, installedGhostStoragePart } from '../../../shared/pluginIdentity.js';
 import { GhostInstallReceiptStore } from '../ghostInstallReceipt.js';
 import { runGhostSnapshotWorkerRequest } from '../ghostSnapshotWorkerProcess.js';
 import {
@@ -344,16 +345,16 @@ describe('GhostLibrarySlot', () => {
     }
   }
 
-  async function seedSourceDatabase(value: string): Promise<void> {
-    expect(await slot.handleLibraryRequest(GHOST_ID, { op: 'db.open', dbPath: 'library.sqlite' }))
+  async function seedSourceDatabase(value: string, instanceId = GHOST_ID): Promise<void> {
+    expect(await slot.handleLibraryRequest(instanceId, { op: 'db.open', dbPath: 'library.sqlite' }))
       .toMatchObject({ ok: true, op: 'db.open' });
-    expect(await slot.handleLibraryRequest(GHOST_ID, {
+    expect(await slot.handleLibraryRequest(instanceId, {
       op: 'db.exec', dbPath: 'library.sqlite', sql: 'CREATE TABLE source_state (value TEXT)',
     })).toMatchObject({ ok: true, op: 'db.exec' });
-    expect(await slot.handleLibraryRequest(GHOST_ID, {
+    expect(await slot.handleLibraryRequest(instanceId, {
       op: 'db.exec', dbPath: 'library.sqlite', sql: 'INSERT INTO source_state VALUES (?)', params: [value],
     })).toMatchObject({ ok: true, op: 'db.exec' });
-    expect(await slot.handleLibraryRequest(GHOST_ID, {
+    expect(await slot.handleLibraryRequest(instanceId, {
       op: 'db.exec', dbPath: 'library.sqlite', sql: 'SELECT value FROM source_state',
     })).toMatchObject({ ok: true, op: 'db.exec', rows: [{ value }] });
   }
@@ -430,7 +431,7 @@ describe('GhostLibrarySlot', () => {
       onArchiveSourceState: relocateLibraryState,
       mutateSnapshot: async ({ parentDir, ...request }) => runGhostSnapshotWorkerRequest(request, parentDir),
     });
-    getGhost = (id) => manager.list().find((installed) => installed.manifest.id === id) ?? null;
+    getGhost = (id) => findInstalledGhostByInstanceId(manager.list(), id) ?? null;
     const pack = async (version: string): Promise<string> => {
       const zip = new JSZip();
       zip.file('ghost.json', JSON.stringify({
@@ -442,9 +443,10 @@ describe('GhostLibrarySlot', () => {
       return file;
     };
     expect(await manager.install(await pack('1.0.0'))).toHaveProperty('ghost');
-    if (location === 'custom') expect((await bindingStore.setBinding(GHOST_ID, candidate)).ok).toBe(true);
-    await seedSourceDatabase('original-source');
-    await slot.disposeGhost(GHOST_ID);
+    const instanceId = installedGhostStoragePart(manager.list()[0]);
+    if (location === 'custom') expect((await bindingStore.setBinding(instanceId, candidate)).ok).toBe(true);
+    await seedSourceDatabase('original-source', instanceId);
+    await slot.disposeGhost(instanceId);
     let resume!: () => void;
     let entered!: () => void;
     const gate = new Promise<void>((resolve) => { resume = resolve; });
@@ -456,7 +458,7 @@ describe('GhostLibrarySlot', () => {
       await gate;
       return resolution;
     });
-    const pending = slot.handleLibraryRequest(GHOST_ID, { op: 'db.open', dbPath: 'late.sqlite' });
+    const pending = slot.handleLibraryRequest(instanceId, { op: 'db.open', dbPath: 'late.sqlite' });
     await started;
     const store = (manager as unknown as { receiptStore: GhostInstallReceiptStore }).receiptStore;
     const write = vi.spyOn(store, 'write').mockImplementationOnce(async () => {
@@ -481,8 +483,8 @@ describe('GhostLibrarySlot', () => {
     expect(result).not.toHaveProperty('rejection.rollbackFailed');
     await manager.retryInterruptedMutationsAfterDbReady();
     expect(manager.list()[0]).toMatchObject({ manifest: { version: '1.0.0' }, approval: { state: 'approved' } });
-    expect(store.readPendingMutationSync(GHOST_ID).state).toBe('missing');
-    const restoredRoot = path.join(location === 'custom' ? candidate : defaultRootBase, GHOST_ID);
+    expect(store.readPendingMutationSync('_root/' + GHOST_ID).state).toBe('missing');
+    const restoredRoot = path.join(location === 'custom' ? candidate : defaultRootBase, instanceId);
     expect(fs.existsSync(path.join(restoredRoot, 'late.sqlite'))).toBe(false);
     expect(fs.existsSync(path.join(location === 'custom' ? candidate : defaultRootBase, archivePart))).toBe(false);
     const restored = new Database(path.join(restoredRoot, 'library.sqlite'), { readonly: true });
@@ -491,7 +493,7 @@ describe('GhostLibrarySlot', () => {
     } finally {
       restored.close();
     }
-    expect(await slot.handleLibraryRequest(GHOST_ID, { op: 'db.open', dbPath: 'library.sqlite' })).toMatchObject({ ok: true });
+    expect(await slot.handleLibraryRequest(instanceId, { op: 'db.open', dbPath: 'library.sqlite' })).toMatchObject({ ok: true });
   });
 
   it.each(['open', 'db.open'] as const)('delayed %s and queued writes stay cancelled after relocation flags clear', async (op) => {

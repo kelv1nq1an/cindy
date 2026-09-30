@@ -845,8 +845,7 @@ describe('connectAccount', () => {
 
   it.each([
     { revision: 'legacy-approval', storagePart: 'helper' },
-    { namespace: null, revision: 'root-approval', storagePart: 'helper' },
-    { namespace: 'acme', revision: 'in-place-approval', storagePart: 'helper' },
+    { namespace: null, revision: 'root-approval', storagePart: '_root__helper' },
     { namespace: 'acme', revision: 'relocated-approval', storagePart: '_ns__acme__helper' },
   ])('keeps an unchanged approved target usable: $revision', async (target) => {
     const vault = memoryVault();

@@ -27,7 +27,7 @@ import type {
 import {
   parsePluginInstallRelId,
   parsePluginStoragePart,
-  pluginInstallRelId,
+  pluginInstanceInstallRelId,
 } from '../../shared/pluginIdentity.js';
 
 export type GhostFirstPartyFactsPurpose = 'install' | 'runtime';
@@ -143,7 +143,7 @@ export function loadGhostFirstPartyFactsLoader(
       const logicalGhostId = parsed?.ghostId ?? ghostId;
       // Receipts / origin live under install rel id (`helper` or `_ns/acme/helper`).
       // Runtime oauth may pass a storage part (`_ns__acme__helper`).
-      const installRelId = parsed ? pluginInstallRelId(parsed) : ghostId;
+      const installRelId = pluginInstanceInstallRelId(ghostId) ?? ghostId;
       const recordedNamespace =
         overrides?.namespace !== undefined
           ? overrides.namespace

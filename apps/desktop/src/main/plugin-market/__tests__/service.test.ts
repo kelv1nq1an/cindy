@@ -1830,33 +1830,25 @@ describe('PluginMarketService migration and defaultInstall', () => {
     });
   });
 
-  it('passes a Host-built pendingMarketRecord for all server-market scopes', async () => {
-    const orgItem = summary({
-      ghostId: 'acme-tool',
-      scope: 'organization',
-      organizationId: 'org-1',
-      source: 'local-market',
-      installed: false,
-    } as Partial<VisiblePluginSummary> & { source: string; installed: boolean });
+  it.each([
+    { scope: 'organization', organizationId: 'org-1', ghostId: 'acme-tool', source: 'local-market', installed: false },
+    { scope: 'public', organizationId: null },
+    { scope: 'personal', organizationId: null },
+  ] as const)('passes a Host-built pendingMarketRecord for $scope server-market installs', async (overrides) => {
+    const item = summary(overrides);
     runtime.install.mockResolvedValue({
-      manifest: manifest('acme-tool'),
-      dir: '/userData/cindy-brain/acme-tool',
+      manifest: manifest(item.ghostId),
+      dir: '/userData/cindy-brain/' + item.ghostId,
       enabled: true,
     });
-    const orgHarness = harness([orgItem]);
-    await orgHarness.service.install(orgItem.id, {
-      ...reviewedInstallOptions(orgItem),
-      expectedManifest: manifest('acme-tool'),
-    }, TEST_INSTALL_CONTEXT);
+    const target = harness([item]);
+    await target.service.install(item.id, reviewedInstallOptions(item), TEST_INSTALL_CONTEXT);
     expect(runtime.install).toHaveBeenCalledWith(
       expect.stringMatching(/\.cindy$/),
       expect.objectContaining({
         pendingMarketRecord: {
-          scope: 'organization',
-          organizationId: 'org-1',
-          source: 'market',
-          installed: true,
-          sha256: orgItem.currentRelease.sha256,
+          scope: item.scope, organizationId: item.organizationId,
+          source: 'market', installed: true, sha256: item.currentRelease.sha256,
         },
       }),
     );
@@ -1867,37 +1859,8 @@ describe('PluginMarketService migration and defaultInstall', () => {
     };
     expect(pending.source).toBe('market');
     expect(pending.installed).toBe(true);
-    // The pending ticket carries only the server Release hash. The approved
-    // side is Host-bound later to inspect(package bytes), so the service cannot
-    // mint a self-reported match.
-    expect(pending.sha256).toBe(orgItem.currentRelease.sha256);
+    expect(pending.sha256).toBe(item.currentRelease.sha256);
     expect(pending).not.toHaveProperty('approvedPackageSha256');
-
-    runtime.install.mockReset();
-    const publicItem = summary({ scope: 'public', organizationId: null });
-    runtime.install.mockResolvedValue({
-      manifest: manifest(),
-      dir: '/userData/cindy-brain/cindy-test',
-      enabled: true,
-    });
-    const publicHarness = harness([publicItem]);
-    await publicHarness.service.install(publicItem.id, reviewedInstallOptions(publicItem), TEST_INSTALL_CONTEXT);
-    expect(runtime.install.mock.calls[0]?.[1]?.pendingMarketRecord).toMatchObject({
-      scope: 'public', organizationId: null, source: 'market', sha256: publicItem.currentRelease.sha256,
-    });
-
-    runtime.install.mockReset();
-    const personalItem = summary({ scope: 'personal', organizationId: null });
-    runtime.install.mockResolvedValue({
-      manifest: manifest(),
-      dir: '/userData/cindy-brain/cindy-test',
-      enabled: true,
-    });
-    const personalHarness = harness([personalItem]);
-    await personalHarness.service.install(personalItem.id, reviewedInstallOptions(personalItem), TEST_INSTALL_CONTEXT);
-    expect(runtime.install.mock.calls[0]?.[1]?.pendingMarketRecord).toMatchObject({
-      scope: 'personal', organizationId: null, source: 'market', sha256: personalItem.currentRelease.sha256,
-    });
   });
 
   it('manual market install accepts the normalized setup manifest returned by detail', async () => {

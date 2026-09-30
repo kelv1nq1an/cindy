@@ -1101,7 +1101,6 @@ import {
   registerGhostIpc,
   runStableOwnerPostCommitTask,
   setGhostNodeRuntimeStartAttemptContextReader,
-  setGhostPhysicalRelocationObserver,
   setGhostsChangedObserver,
   suspendAllGhosts,
   waitForGhostMutations,
@@ -2471,9 +2470,6 @@ const ghostPanelWindowsController = new GhostPanelWindowsController({
   log: createLogger('ghost-panel-window-controller'),
 });
 registerGhostPanelWindowIpc(ghostPanelWindowsController);
-setGhostPhysicalRelocationObserver((fromId, toId) => {
-  ghostPanelWindowsController.relocate(fromId, toId);
-});
 
 // ── 资源监视器辅助窗口 ──────────────────────────────────────────────
 // 单实例轻量辅助窗口:顶部菜单「资源监视器」→ open()。不需要 detach/attach 偏好、

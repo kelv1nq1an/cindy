@@ -238,7 +238,6 @@ export function setGhostConnectionsHandler(handler: GhostConnectionsProtocolHand
 /** 该分区是否已挂过协议 handler(session 分区随 app 生命周期,挂一次即可)。 */
 const partitionRegistered = new Set<string>();
 const revokedPartitions = new Set<string>();
-const suspendedPartitions = new Set<string>();
 const partitionGhost = new Map<string, { dir: string; entry: string; storagePart: string }>();
 const partitionTargetGuard = new Map<string, () => boolean>();
 type GhostProtocolOwnerIdentity = Pick<ActiveAppSession, 'mode' | 'dataOwnerId' | 'generation'>;
@@ -283,19 +282,6 @@ export function revokeLegacyGhostProtocolPartition(ghostId: string): void {
   }
 }
 
-export function suspendGhostProtocolForRelocation(ghost: InstalledGhost): void {
-  const partition = ownerScopedGhostPartitionForInstalledGhost(ghost, getActiveAppSession());
-  if (partition) suspendedPartitions.add(partition);
-}
-
-export function resumeGhostProtocolAfterRelocation(ghost: InstalledGhost): void {
-  const owner = getActiveAppSession();
-  const partition = ownerScopedGhostPartitionForInstalledGhost(ghost, owner);
-  if (!partition) return;
-  registerGhostProtocol(partition, ghost, ghostProtocolOwnerSnapshot(owner));
-  suspendedPartitions.delete(partition);
-}
-
 /**
  * 意识页面(html 响应)统一佩戴的 CSP:脚本/样式/资源只许同源(= 自己的
  * 安装目录),img 额外放行 data:/blob:/https:(远程图片),media 额外放行
@@ -315,7 +301,7 @@ function createGhostProtocolTargetGuard(
   const expectedTarget = store.captureTarget(ghostId);
   return () => expectedTarget !== null && expectedTarget !== undefined &&
     ghostKvStore === store && !revokedPartitions.has(partition) &&
-    !suspendedPartitions.has(partition) && isGhostProtocolOwnerActive(owner) &&
+    isGhostProtocolOwnerActive(owner) &&
     store.isTargetCurrent(ghostId, expectedTarget);
 }
 

@@ -634,6 +634,8 @@ describe('PluginMarketLedger', () => {
     expect(ledger.installationForGhost('helper')).toBeNull();
     expect(ledger.installationsForGhost('helper')).toHaveLength(2);
     expect(ledger.installationForLookup('helper')).toMatchObject({ namespace: null });
+    expect(ledger.installationForLookup('_root/helper')).toMatchObject({ namespace: null });
+    expect(ledger.installationForLookup('_root__helper')).toMatchObject({ namespace: null });
     expect(ledger.installationForLookup('_ns__acme__helper')).toMatchObject({ namespace: 'acme' });
     const main = JSON.parse(fs.readFileSync(filePath, 'utf8')) as {
       installations: Record<string, { namespace?: string | null }>;

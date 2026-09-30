@@ -750,7 +750,7 @@ describe('skillSlot · 全链路(打包 → 装入 → 对账 → 双端可见)'
       await fs.promises.readFile(path.join(sharedDir(), linkName, 'SKILL.md'), 'utf8'),
     ).toContain('演示技能');
     await fs.promises.writeFile(
-      path.join(brainRoot, 'e2e-ghost', 'skills', 'demo', 'SKILL.md'),
+      path.join(manager.list()[0].dir, 'skills', 'demo', 'SKILL.md'),
       '---\nname: demo\ndescription: 演示技能\n---\n\n篡改后的指令\n',
     );
     expect(

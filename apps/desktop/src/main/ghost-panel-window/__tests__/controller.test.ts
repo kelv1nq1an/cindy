@@ -551,35 +551,24 @@ describe('reconcile', () => {
     expect(h.entries()['_ns__acme__helper']).toEqual({ detached: true, lastOpen: true });
   });
 
-  it('replaces an old in-place window when its organization plugin moves out for a new root', () => {
-    const h = makeHarness(new Set(['helper', '_ns__acme__helper']));
-    h.controller.setDetached('helper', true);
-    const oldWindow = h.created[0].win;
-    h.controller.relocate('helper', '_ns__acme__helper');
-    const org = ghost('helper');
-    org.namespace = 'acme';
-    org.dir = '/fake/_ns/acme/helper';
-    h.controller.reconcile([org, ghost('helper')]);
-    expect(oldWindow.isDestroyed()).toBe(true);
-    expect(h.entries().helper).toBeUndefined();
-    expect(h.entries()['_ns__acme__helper']).toEqual({ detached: true, lastOpen: true });
-    expect(h.created[1].ghostId).toBe('_ns__acme__helper');
-  });
-  it('does not overwrite a destination window preference during relocation', () => {
-    const h = makeHarness(new Set(['helper', '_ns__acme__helper']));
-    h.controller.setDetached('helper', true);
-    h.setEntries({
-      helper: { detached: true, lastOpen: true },
-      _ns__acme__helper: { detached: false, lastOpen: false },
-    });
-    h.controller.relocate('helper', '_ns__acme__helper');
-    expect(h.created[0].win.isDestroyed()).toBe(true);
-    expect(h.entries()).toEqual({ _ns__acme__helper: { detached: false, lastOpen: false } });
-  });
-
 });
 
 describe('two-phase ready + sender guard', () => {
+  it('keeps a legacy organization window when a same-name root is installed separately', () => {
+    const h = makeHarness(new Set(['helper', '_root__helper']));
+    h.controller.setDetached('helper', true);
+    const oldWindow = h.created[0].win;
+    const org = ghost('helper');
+    org.namespace = 'acme';
+    org.dir = '/fake/helper';
+    const root = ghost('helper');
+    root.namespace = null;
+    root.dir = '/fake/_root/helper';
+    h.controller.reconcile([org, root]);
+    expect(oldWindow.isDestroyed()).toBe(false);
+    expect(h.entries().helper).toEqual({ detached: true, lastOpen: true });
+    expect(h.entries()['_root__helper']).toBeUndefined();
+  });
   it('markRendererReady from correct sender succeeds', () => {
     const h = makeHarness(new Set(['a']));
     h.controller.prewarm('a');

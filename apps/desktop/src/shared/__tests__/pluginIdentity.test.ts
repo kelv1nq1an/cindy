@@ -16,6 +16,8 @@ import {
   parsePluginInstanceId,
   parsePluginStoragePart,
   pluginInstallRelId,
+  pluginNewInstallRelId,
+  pluginInstallStoragePart,
   pluginLedgerRecordKey,
   pluginStoragePart,
   isValidPluginStoragePart,
@@ -30,6 +32,23 @@ import {
 } from '../pluginIdentity.js';
 
 describe('plugin logical identity', () => {
+  it('gives new roots distinct physical directories and keys without changing legacy keys', () => {
+    const identity = createPluginLogicalIdentity(null, 'helper');
+    const legacy = { manifest: { id: 'helper' }, namespace: null, dir: '/ghosts/helper' };
+    const fresh = { ...legacy, dir: '/ghosts/_root/helper' };
+    expect(pluginNewInstallRelId(identity)).toBe('_root/helper');
+    expect(parsePluginInstallRelId('_root/helper')).toEqual(identity);
+    expect(parsePluginStoragePart('_root__helper')).toEqual(identity);
+    expect(pluginInstallStoragePart('_root/helper')).toBe('_root__helper');
+    expect(installedGhostPhysicalKeys(legacy)).toEqual({ relId: 'helper', storagePart: 'helper' });
+    expect(installedGhostPhysicalKeys(fresh)).toEqual({ relId: '_root/helper', storagePart: '_root__helper' });
+    expect(resolvePluginLibraryStorageKey('_root/helper')).toBe('_root__helper');
+    expect(findInstalledGhostByInstanceId([fresh], '_root/helper')).toBe(fresh);
+    expect(findInstalledGhostByInstanceId([fresh], '_root__helper')).toBe(fresh);
+    expect(findInstalledGhostByInstanceId([legacy], '_root__helper')).toBeUndefined();
+    expect(parsePluginInstallRelId('_root/../helper')).toBeNull();
+    expect(parsePluginStoragePart('_root__helper__extra')).toBeNull();
+  });
   it('keeps missing namespace as legacy instead of silently mapping it to root', () => {
     expect(resolvePluginNamespaceState({})).toEqual({ kind: 'legacy' });
     expect(resolvePluginNamespaceState({ namespace: null })).toEqual({

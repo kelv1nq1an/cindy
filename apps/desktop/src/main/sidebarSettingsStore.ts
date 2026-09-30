@@ -616,32 +616,6 @@ async function setMainViewHidden(rawRequest: unknown): Promise<string[]> {
   return Array.from(nextSettings.hiddenMainViewGhostIds);
 }
 
-export async function relocateHiddenMainViewGhostId(from: string, to: string): Promise<void> {
-  if (from === to) return;
-  requireGhostId(from);
-  requireGhostId(to);
-  const scopeKey = activeOwnerScopeKey();
-  const ownerStamp = getActiveDataOwnerPushStamp();
-  assertRequestedOwner(ownerStamp);
-  requireSidebarStoreAccess();
-  const store = currentStore();
-  let changed = false;
-  const settings = await enqueueWrite(scopeKey, () =>
-    store.updateAtomic(({ value }) => {
-      requireSidebarStoreAccess({ rejectSnapshotChange: true });
-      const ids = value.hiddenMainViewGhostIds;
-      if (!ids.includes(from)) return {};
-      if (ids.includes(to)) throw new Error('hidden main-view relocation destination collision');
-      changed = true;
-      return { hiddenMainViewGhostIds: ids.map((id) => id === from ? to : id) };
-    }, SIDEBAR_WRITE_OPTIONS),
-  );
-  assertScopeCurrent(scopeKey);
-  if (changed) {
-    broadcastHiddenMainViewGhostIdsChanged(settings.hiddenMainViewGhostIds, ownerStamp);
-  }
-}
-
 type SidebarPathState = 'missing' | 'regular-file' | 'blocked';
 
 function sidebarPathState(file: string): SidebarPathState {
